@@ -275,8 +275,8 @@ Hotkeys (changes from the two-mode version in bold):
 The sheets are read from `data/konbini/` at startup, and **downloaded in the
 background at startup when that folder is empty** (previously on the first
 `Ctrl+Alt+K`); the status line shows `fetching Setup Konbini...` meanwhile.
-A completed Konbini setup reads `setup complete (no solve data)`: solves
-for Konbini setups come from the solve search (next section).
+A completed Konbini setup gets solves from the perfect-clear search (see
+"Perfect-clear solve search").
 
 Tests: `cargo test --bin run-overlay` covers source-first on the 2nd PC,
 the `Ctrl+Alt+K` override, fallback with the reason in the note, other PCs,
@@ -343,6 +343,78 @@ search takes 0.1-8 ms on average and 26 ms at worst (5th PC), measured by
 2026-10-21 with no problems reported.
 The solves after the setup and the sheets' cover data are not used.
 
+## Perfect-clear solve search (SRS+)
+
+The user's decision (2026-10-21) was to use knewjade's solution-finder with
+SRS+. It is integrated as a Rust reimplementation of its perfect-clear
+search inside `src/finder.rs`, not by calling the Java `sfinder.jar`:
+
+| | Rust in `finder.rs` (chosen) | `sfinder.jar` as a process |
+|---|---|---|
+| Speed | 3.6 ms mean, 31 ms max per live search (below) | JVM start alone is hundreds of ms per call; a resident process would need a protocol |
+| Distribution | nothing extra; the overlay stays one `.exe` | needs a Java runtime and the jar next to the overlay |
+| SRS+ | the same TETR.IO table the setup search already uses (triangle.js), 180-degree turns included | sfinder ships no SRS+ table; a kicks file would have to duplicate this table and could drift from it |
+
+The search follows solution-finder's two layers for a perfect clear:
+
+1. Tile the empty cells of the 4-line (or lower) field with the pieces
+   available, ignoring order: each step covers the lowest empty cell. A
+   piece placed after a row clears is drawn split around that row, so
+   each shape `k` rows tall may take any `k` of the drawing rows
+   (solution-finder's line-clear-aware placements).
+2. Keep a tiling when some order of it can be played: every piece comes
+   from the queue with one HOLD slot (HOLD may be played after the queue
+   ends), lands with SRS+ movement on the field of the moment (the move
+   generator above, cached per field and piece), and is placed only after
+   the rows it is drawn split around have cleared.
+
+`Finder::perfect_clears` tries the lowest height from the top block up to
+4 rows whose empty cells the pieces can fill; `konbini::find_perfect_clears`
+runs it on the live board with HOLD, Current, and NEXT5 (pieces beyond
+NEXT are not guessed, so a solve needing them is not found). A first
+version that searched piece orders directly (DFS over every placement)
+took about 1 s per 7-piece search, as ~100,000 fields needed move
+generation; tiling first cut that to milliseconds.
+
+In `run-overlay`, once the shown Setup Konbini setup is complete (or the
+board matches no setup, e.g. the player went their own way), the solves
+are searched once for that state (at most 100) and
+
+- the status reads `N perfect clear(s) found (4 lines); press S to show the solve`;
+- `S` / `Ctrl+Alt+S` show / toggle it as before; the solve's remaining cells
+  are drawn like setup cells (Current's piece highlighted);
+- `Ctrl+Alt+N` / `Ctrl+Alt+B` switch between the solves while any exist
+  (between setups otherwise); the status reads
+  `perfect clear i/N (search, SRS+, 4 lines)`;
+- each later board is read against the solve as a drawing (cleared rows
+  inferred, as for setups), so placed pieces drop out; a board that
+  follows no found solve drops them and searches again from that board.
+
+The 2nd PC with source rules keeps the source solves (`[source]`); the
+searched solves are used for Setup Konbini guidance.
+
+Checks:
+
+- `tests/pc_solutions.rs`: every one of the 1008 verified source solves
+  (`data/ijlo.json` and `data/cases/*.json`) is found by the search from
+  its finished setup with its pieces in any order (each piece kept to the
+  cells of its type, which prunes only the other solutions). The source
+  solves were checked with SRS 90-degree movement; all of them are also
+  reachable with SRS+.
+- `cargo run --release --example pc_timing`: the same 1008 setups with the
+  solve's pieces shuffled into a queue, HOLD empty, cold cache. The 988
+  searches of at most 7 pieces (what the overlay sees) take 3.6 ms on
+  average and 31 ms at worst; with up to 9 pieces (setups of one piece)
+  7.7 ms on average and 475 ms at worst. 950 of the 1008 queues allow a
+  perfect clear; the source solve itself is among them in 567 of 921
+  comparable cases, since a shuffled order often rules it out.
+- `cargo test --bin run-overlay`: a built TILJ setup is announced, `S`
+  shows a 24-cell solve, `Ctrl+Alt+N` switches to a different one, and a
+  placed solve piece drops out.
+
+Not done: solves for a source setup whose own solves do not apply, the
+undisclosed pieces after NEXT, and a check in TETR.IO.
+
 ## TETR.IO display-scale calibration
 
 Run the following while the visible TETR.IO window is showing the normal ZEN
@@ -403,12 +475,9 @@ without changing any session state.
    continue to receive only complete, stable observations.
 5. Done (2026-10-18): every case of the source is generated by
    `tools/build_cases.py` (see "Generated cases"). Not yet tried in TETR.IO.
-6. Planned: integrate knewjade's solution-finder to show several solves at
-   once and to support SRS+ (180-degree rotation). The same search would
-   also find the solves after a Setup Konbini setup; the setups themselves
-   are already checked for the live queue (see "Unified guidance"). Until then solves come
-   only from the source diagrams, checked with SRS 90-degree movement by
-   `tools/ijlo_solves.py`.
+6. Done (2026-10-21): a Rust perfect-clear search after solution-finder
+   with SRS+ finds the solves after a Setup Konbini setup, several at once
+   (see "Perfect-clear solve search"). Not yet tried in TETR.IO.
 7. TODO (found 2026-10-21): resetting the board with `R` in TETR.IO breaks
    the PC number. The tracker advances it on every board that empties, and
    a restarted game cannot be told from a PC by the piece sequence, since
