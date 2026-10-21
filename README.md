@@ -381,6 +381,12 @@ without changing any session state.
    are already checked for the live queue (see "Setup Konbini mode"). Until then solves come
    only from the source diagrams, checked with SRS 90-degree movement by
    `tools/ijlo_solves.py`.
+7. TODO (found 2026-10-21): resetting the board with `R` in TETR.IO breaks
+   the PC number. The tracker advances it on every board that empties, and
+   a restarted game cannot be told from a PC by the piece sequence, since
+   the 1st PC usually has no visible bag boundary. Until it is fixed, use
+   `Ctrl+Alt+1..7` after a reset. Planned fix: track key input (the reset
+   key) to restart at PC 1.
 
 `run-overlay` is the user-facing Windows surface. The S/Z queue and save-O setups are verified;
 the sandbox setup is shown as reference guidance, not as a verified
