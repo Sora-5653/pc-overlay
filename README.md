@@ -415,6 +415,45 @@ Checks:
 Not done: solves for a source setup whose own solves do not apply, the
 undisclosed pieces after NEXT, and a check in TETR.IO.
 
+## Settings window (`pc-overlay-gui`)
+
+```powershell
+cargo build --release
+.\target\release\pc-overlay-gui.exe      # run from the repository folder
+```
+
+A small window with four buttons and a status text, refreshed every second:
+
+- **Start overlay / Stop overlay**: runs `run-overlay.exe` from the same
+  folder as the window (stop kills the process; the overlay has no other
+  exit than Ctrl+C).
+- **Calibrate board**: runs `configure-overlay.exe` (drag over the board,
+  Enter saves, Esc cancels); restart the overlay afterwards.
+- **Download Setup Konbini**: the same download as `fetch-konbini`, in the
+  background.
+- Status: whether the overlay and the calibration run, the saved
+  calibration ratios (or that the default profile is used), the source
+  rules found, how many of the 7 Konbini sheets are cached, and the last
+  message. Below it, the hotkey list.
+
+Choice: plain Win32 through `windows-sys`, which the overlay already uses
+(`BUTTON` and `STATIC` controls, a 1-second `WM_TIMER`), so the GUI adds no
+dependency. egui/eframe would add a GPU or GL backend and about 200 crates
+for four buttons and a text block; worth it only if the window grows
+editable settings or a live board preview.
+
+Tests: `cargo test --bin pc-overlay-gui` (status text, missing data,
+hotkey list). The window was opened and captured on 2026-10-21 (layout
+checked); the buttons were not pressed, so starting the overlay and the
+calibration from it, and the download, are not verified.
+
+Design notes for later: the window only knows whether the overlay process
+runs. Showing the overlay's own status (PC number, guidance origin, solve
+count) needs a channel from `run-overlay`, e.g. a status line written to
+stdout and read through a pipe, or a small JSON file. Editable settings
+(paths, `--reviewed-only`, the Konbini preference) would become
+command-line arguments of the started overlay.
+
 ## TETR.IO display-scale calibration
 
 Run the following while the visible TETR.IO window is showing the normal ZEN

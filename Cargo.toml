@@ -57,3 +57,7 @@ path = "src/bin/fetch_konbini.rs"
 [[bin]]
 name = "probe-recognition"
 path = "src/bin/probe_recognition.rs"
+
+[[bin]]
+name = "pc-overlay-gui"
+path = "src/bin/settings_gui.rs"
