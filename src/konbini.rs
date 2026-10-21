@@ -3,10 +3,10 @@
 //!
 //! Each `Nth: Data` sheet is fetched as CSV and cached under `data/konbini/`.
 //! A sheet holds one or more blocks of setups (`ID`, `SOL`, `FUMEN` columns);
-//! the setup cells come from the first page of the fumen. Nothing here judges
-//! which setup solves a queue: candidates are only filtered by the pieces the
-//! PC can place and by the current board, then ranked by the sheet's solve
-//! rate. Queue-aware search is left to a later solution-finder integration.
+//! the setup cells come from the first page of the fumen. Candidates are the
+//! setups that match the board and can still be built from the live HOLD and
+//! queue with SRS+ (`crate::finder`), ranked by the sheet's solve rate.
+//! Whether a built setup then reaches a perfect clear is not searched.
 
 use std::{
     collections::BTreeSet,
@@ -18,8 +18,9 @@ use std::{
 use thiserror::Error;
 
 use crate::{
+    finder::{self, Buildable, Finder, Mask, Target},
     fumen::{FumenCell, decode_first_page},
-    model::{Board, Piece},
+    model::{Board, Cell, Observation, Piece},
 };
 
 pub const SPREADSHEET_ID: &str = "1tI9fPeeEEEhWS2h0Gzib5UIjLKN33wd18WQSKRjxYMw";
@@ -70,6 +71,7 @@ pub struct KonbiniSetup {
     pub sol_percent: Option<f32>,
     pub fumen: String,
     pub cells: Vec<FumenCell>,
+    pub target: Target,
 }
 
 impl KonbiniSetup {
@@ -107,27 +109,47 @@ impl KonbiniSetup {
         shortfall <= unknown
     }
 
-    /// Compares the setup with the board. `None` when the board has a block
-    /// the setup does not explain (a cell outside it, or the wrong colour on
-    /// a coloured cell); gray setup cells accept any piece.
+    /// Reads the board as this setup in progress. Rows the setup fills
+    /// clear in the game, so cleared rows are inferred. `None` when the board
+    /// has a block the setup does not explain (a cell outside it, or the
+    /// wrong colour on a coloured cell); gray cells accept any piece.
     pub fn progress(&self, board: &Board) -> Option<KonbiniProgress> {
-        let mut remaining = Vec::new();
-        let mut placed = 0;
-        for cell in &self.cells {
-            match board[usize::from(cell.cell.y)][usize::from(cell.cell.x)] {
-                None => remaining.push(*cell),
-                Some(observed) if cell.piece.is_none_or(|piece| piece == observed) => placed += 1,
-                Some(_) => return None,
+        let mut field: Mask = 0;
+        for (y, row) in board.iter().enumerate() {
+            for (x, cell) in row.iter().enumerate() {
+                if cell.is_some() {
+                    if y >= finder::FIELD_ROWS {
+                        return None;
+                    }
+                    field |= finder::bit(x as u8, y as u8);
+                }
             }
         }
-        let filled = board.iter().flatten().filter(|cell| cell.is_some()).count();
-        (filled == placed).then_some(KonbiniProgress { placed, remaining })
+        let placed = self.target.read_field(field, |x, y| {
+            board[usize::from(y)][usize::from(x)].expect("read_field asks for filled cells")
+        })?;
+        let remaining = self
+            .target
+            .remaining_on_field(placed)
+            .into_iter()
+            .map(|(x, y, drawing_y)| FumenCell {
+                cell: Cell { x, y },
+                piece: self
+                    .cells
+                    .iter()
+                    .find(|cell| cell.cell == Cell { x, y: drawing_y })
+                    .and_then(|cell| cell.piece),
+            })
+            .collect();
+        Some(KonbiniProgress { placed, remaining })
     }
 }
 
+/// The drawing cells already placed, and the rest as cells of the live
+/// board (after line clears).
 #[derive(Debug, Clone, PartialEq)]
 pub struct KonbiniProgress {
-    pub placed: usize,
+    pub placed: Mask,
     pub remaining: Vec<FumenCell>,
 }
 
@@ -135,12 +157,32 @@ impl KonbiniProgress {
     pub fn complete(&self) -> bool {
         self.remaining.is_empty()
     }
+
+    /// Pieces placed for the setup, counting cleared rows.
+    pub fn placed_pieces(&self) -> usize {
+        self.placed.count_ones() as usize / 4
+    }
+}
+
+/// The live state a candidate is searched from.
+#[derive(Debug, Clone)]
+pub struct BuildQuery<'a> {
+    /// HOLD at the PC start followed by the queue disclosed since.
+    pub pc_pieces: &'a [Piece],
+    pub observation: &'a Observation,
+    /// Pieces dealt before this PC began (10 per PC in a perfect-clear
+    /// loop), for the 7-bag of undisclosed pieces. `None` assumes nothing.
+    pub pieces_before_pc: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
 pub struct KonbiniCandidate<'a> {
+    /// Index into `KonbiniLibrary::setups`.
+    pub setup_index: usize,
     pub setup: &'a KonbiniSetup,
     pub progress: KonbiniProgress,
+    /// `Always` or `Sometimes` (depends on pieces not yet in NEXT).
+    pub buildable: Buildable,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -187,21 +229,33 @@ impl KonbiniLibrary {
                 if !fumen.starts_with("v115@") {
                     continue;
                 }
+                let issue =
+                    |message: String| format!("stage {stage} row {}: {message}", row_index + 1);
                 match decode_first_page(fumen) {
-                    Ok(cells) if !cells.is_empty() => setups.push(KonbiniSetup {
-                        stage,
-                        source: block.source.clone(),
-                        id: cell(row, block.id).trim().to_string(),
-                        sol_percent: block
-                            .sol
-                            .and_then(|column| parse_percent(cell(row, column))),
-                        fumen: fumen.to_string(),
-                        cells,
-                    }),
+                    Ok(cells) if !cells.is_empty() => {
+                        let Some(target) = Target::new(
+                            cells
+                                .iter()
+                                .map(|cell| (cell.cell.x, cell.cell.y, cell.piece)),
+                        ) else {
+                            self.issues
+                                .push(issue(format!("taller than {} rows", finder::FIELD_ROWS)));
+                            continue;
+                        };
+                        setups.push(KonbiniSetup {
+                            stage,
+                            source: block.source.clone(),
+                            id: cell(row, block.id).trim().to_string(),
+                            sol_percent: block
+                                .sol
+                                .and_then(|column| parse_percent(cell(row, column))),
+                            fumen: fumen.to_string(),
+                            cells,
+                            target,
+                        });
+                    }
                     Ok(_) => {}
-                    Err(error) => self
-                        .issues
-                        .push(format!("stage {stage} row {}: {error}", row_index + 1)),
+                    Err(error) => self.issues.push(issue(error.to_string())),
                 }
             }
         }
@@ -223,24 +277,54 @@ impl KonbiniLibrary {
             .count()
     }
 
-    /// Setups of `stage` that the PC's pieces can supply and the board
-    /// matches, best solve rate first. `pc_pieces` is HOLD at the PC start
-    /// followed by the queue as disclosed since then.
+    /// Setups of `stage` that the board matches and that can still be built
+    /// from the live HOLD, Current, and NEXT with SRS+, those buildable for
+    /// any undisclosed pieces first, then by solve rate.
     pub fn candidates(
         &self,
         stage: u8,
-        pc_pieces: &[Piece],
-        board: &Board,
+        query: &BuildQuery<'_>,
+        finder: &mut Finder,
     ) -> Vec<KonbiniCandidate<'_>> {
-        self.setups
+        let observation = query.observation;
+        let queue: Vec<Piece> = std::iter::once(observation.current)
+            .chain(observation.next5)
+            .collect();
+        let mut candidates: Vec<KonbiniCandidate<'_>> = self
+            .setups
             .iter()
-            .filter(|setup| setup.stage == stage && setup.fits_pieces(pc_pieces))
-            .filter_map(|setup| {
-                setup
-                    .progress(board)
-                    .map(|progress| KonbiniCandidate { setup, progress })
+            .enumerate()
+            .filter(|(_, setup)| setup.stage == stage && setup.fits_pieces(query.pc_pieces))
+            .filter_map(|(setup_index, setup)| {
+                let progress = setup.progress(&observation.board)?;
+                let remaining = setup.target.piece_count() - progress.placed_pieces();
+                let slots = (remaining + 1).saturating_sub(queue.len());
+                let unknown = match query.pieces_before_pc {
+                    Some(before) => finder::bag_options(
+                        before + progress.placed_pieces() + usize::from(observation.hold.is_some()),
+                        &queue,
+                        slots,
+                    ),
+                    None => vec![finder::ALL_PIECES.to_vec(); slots],
+                };
+                let buildable = finder.buildable(
+                    &setup.target,
+                    progress.placed,
+                    observation.hold,
+                    &queue,
+                    &unknown,
+                );
+                (buildable != Buildable::Never).then_some(KonbiniCandidate {
+                    setup_index,
+                    setup,
+                    progress,
+                    buildable,
+                })
             })
-            .collect()
+            .collect();
+        // Stable: setups are already ordered by solve rate.
+        candidates.sort_by_key(|candidate| candidate.buildable != Buildable::Always);
+        candidates
     }
 }
 
@@ -513,8 +597,6 @@ mod tests {
             .iter()
             .flat_map(|piece| std::iter::repeat_n(*piece, coloured[piece_index(*piece)]))
             .collect();
-        let board = empty_board();
-
         // Exactly the pieces plus one spare: fits.
         let mut queue = needed.clone();
         queue.push(Piece::O);
@@ -525,30 +607,105 @@ mod tests {
         assert!(!best.fits_pieces(&late));
         // Undisclosed pieces may still bring it.
         assert!(best.fits_pieces(&needed[1..]));
-        assert!(
-            library
-                .candidates(2, &queue, &board)
-                .iter()
-                .any(|candidate| std::ptr::eq(candidate.setup, best))
+    }
+
+    fn observation(hold: Option<Piece>, queue: [Piece; 6]) -> Observation {
+        Observation {
+            board: empty_board(),
+            hold,
+            current: queue[0],
+            next5: [queue[1], queue[2], queue[3], queue[4], queue[5]],
+        }
+    }
+
+    fn shown(library: &KonbiniLibrary, observation: &Observation) -> Vec<(f32, Buildable)> {
+        let pc_pieces: Vec<Piece> = observation
+            .hold
+            .into_iter()
+            .chain(std::iter::once(observation.current))
+            .chain(observation.next5)
+            .collect();
+        let query = BuildQuery {
+            pc_pieces: &pc_pieces,
+            observation,
+            pieces_before_pc: Some(10),
+        };
+        library
+            .candidates(2, &query, &mut Finder::new())
+            .iter()
+            .map(|candidate| (candidate.setup.sol_percent.unwrap(), candidate.buildable))
+            .collect()
+    }
+
+    #[test]
+    fn candidates_are_the_setups_the_queue_can_build() {
+        let library = library(2, SECOND);
+        // Both TILJ setups build from T, I, L, J in this order.
+        let tilj = [Piece::T, Piece::I, Piece::L, Piece::J, Piece::O, Piece::S];
+        assert_eq!(
+            shown(&library, &observation(None, tilj)),
+            vec![(100.0, Buildable::Always), (98.33, Buildable::Always)]
         );
+        // Some order is not buildable for one of them: every order of the
+        // four pieces, with HOLD empty, finds a difference.
+        let mut differs = false;
+        for order in permutations(&[Piece::T, Piece::I, Piece::L, Piece::J]) {
+            let queue = [order[0], order[1], order[2], order[3], Piece::O, Piece::S];
+            differs |= shown(&library, &observation(None, queue)).len() < 2;
+        }
+        assert!(differs, "the build order should matter for some queue");
+        // A queue without the pieces shows nothing.
+        let other = [Piece::O, Piece::S, Piece::Z, Piece::O, Piece::S, Piece::Z];
+        assert!(shown(&library, &observation(None, other)).is_empty());
+    }
+
+    fn permutations(pieces: &[Piece]) -> Vec<Vec<Piece>> {
+        if pieces.len() <= 1 {
+            return vec![pieces.to_vec()];
+        }
+        let mut all = Vec::new();
+        for index in 0..pieces.len() {
+            let mut rest = pieces.to_vec();
+            let first = rest.remove(index);
+            for mut tail in permutations(&rest) {
+                tail.insert(0, first);
+                all.push(tail);
+            }
+        }
+        all
     }
 
     #[test]
     fn the_board_must_match_the_setup() {
         let library = library(2, SECOND);
         let setup = &library.setups[0];
+        // Place every cell of one piece colour that has exactly 4 cells.
+        let piece = PIECES
+            .into_iter()
+            .find(|piece| {
+                setup
+                    .cells
+                    .iter()
+                    .filter(|cell| cell.piece == Some(*piece))
+                    .count()
+                    == 4
+            })
+            .unwrap();
         let mut board = empty_board();
-        let first = setup.cells[0];
-        board[usize::from(first.cell.y)][usize::from(first.cell.x)] = first.piece;
+        for cell in setup.cells.iter().filter(|cell| cell.piece == Some(piece)) {
+            board[usize::from(cell.cell.y)][usize::from(cell.cell.x)] = Some(piece);
+        }
         let progress = setup.progress(&board).unwrap();
-        assert_eq!(progress.placed, 1);
-        assert_eq!(progress.remaining.len(), setup.cells.len() - 1);
+        assert_eq!(progress.placed_pieces(), 1);
+        assert_eq!(progress.remaining.len(), setup.cells.len() - 4);
 
         // A wrong colour on a setup cell rejects it.
-        let wrong = PIECES
-            .into_iter()
-            .find(|piece| Some(*piece) != first.piece)
+        let first = setup
+            .cells
+            .iter()
+            .find(|cell| cell.piece == Some(piece))
             .unwrap();
+        let wrong = PIECES.into_iter().find(|other| *other != piece).unwrap();
         board[usize::from(first.cell.y)][usize::from(first.cell.x)] = Some(wrong);
         assert!(setup.progress(&board).is_none());
 

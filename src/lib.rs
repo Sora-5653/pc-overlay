@@ -8,6 +8,7 @@ pub mod calibration;
 pub mod capture;
 pub mod condition;
 pub mod diagram;
+pub mod finder;
 pub mod fumen;
 pub mod guidance;
 pub mod konbini;

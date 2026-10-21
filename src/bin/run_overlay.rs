@@ -11,7 +11,11 @@ use pc_overlay_core::{
     BoardCalibration, CommitOutcome, DiagramSet, FrameSize, OverlayBoard, OverlayCell,
     OverlayCellKind, OverlayState, OverlayWindow, Piece, RecognizerConfig, RuleSet, SessionTracker,
     SolveProgress, StabilityConfig, StabilityFilter, TetrioRecognizer, TrackerConfig, WindowInfo,
-    WindowLocator, konbini, konbini::KonbiniLibrary, piece_code,
+    WindowLocator,
+    finder::{Buildable, Finder},
+    konbini,
+    konbini::{BuildQuery, KonbiniLibrary, KonbiniProgress},
+    piece_code,
 };
 
 #[cfg(windows)]
@@ -348,7 +352,24 @@ struct KonbiniMode {
     index: isize,
     /// The PC the index belongs to: ordinal and start timestamp.
     pc_key: Option<(u8, u64)>,
+    finder: Finder,
+    /// Candidates of the last searched state, reused until it changes.
+    shortlist: Option<(ShortlistKey, Vec<Shortlisted>)>,
 }
+
+/// What a shortlist depends on: PC number, observation, and PC pieces.
+type ShortlistKey = (u8, pc_overlay_core::Observation, Vec<Piece>);
+
+/// A candidate setup by index into the library.
+#[derive(Debug, Clone)]
+struct Shortlisted {
+    setup: usize,
+    progress: KonbiniProgress,
+    buildable: Buildable,
+}
+
+/// Move-generation cache entries kept before the cache is dropped.
+const FINDER_CACHE_LIMIT: usize = 200_000;
 
 impl KonbiniMode {
     fn new(dir: PathBuf) -> Self {
@@ -360,6 +381,8 @@ impl KonbiniMode {
             error: None,
             index: 0,
             pc_key: None,
+            finder: Finder::new(),
+            shortlist: None,
         }
     }
 
@@ -460,7 +483,24 @@ impl KonbiniMode {
                 .replacen("PC Overlay", "PC Overlay [Konbini]", 1);
             return;
         };
-        let (status, cells) = konbini_guidance(library, tracker, snapshot, &mut self.index);
+        let key = (
+            snapshot.pc_ordinal.get(),
+            snapshot.observation.clone(),
+            pc_pieces(tracker, snapshot),
+        );
+        if self
+            .shortlist
+            .as_ref()
+            .is_none_or(|(known, _)| *known != key)
+        {
+            if self.finder.cached_moves() > FINDER_CACHE_LIMIT {
+                self.finder.clear_cache();
+            }
+            let shortlist = konbini_shortlist(library, &mut self.finder, tracker, snapshot);
+            self.shortlist = Some((key, shortlist));
+        }
+        let shortlist = &self.shortlist.as_ref().expect("just computed").1;
+        let (status, cells) = konbini_render(library, snapshot, shortlist, &mut self.index);
         state.status = status;
         state.cells = cells;
     }
@@ -479,21 +519,57 @@ fn pc_pieces(
         .collect()
 }
 
-/// The candidate setup at `index` (wrapped into range) for the snapshot's PC.
+/// The setups of the snapshot's PC that match the board and can be built
+/// from its HOLD and queue.
+fn konbini_shortlist(
+    library: &KonbiniLibrary,
+    finder: &mut Finder,
+    tracker: &SessionTracker,
+    snapshot: &pc_overlay_core::tracker::Snapshot,
+) -> Vec<Shortlisted> {
+    let stage = snapshot.pc_ordinal.get();
+    let pieces = pc_pieces(tracker, snapshot);
+    let query = BuildQuery {
+        pc_pieces: &pieces,
+        observation: &snapshot.observation,
+        // A perfect-clear loop deals 10 pieces per PC.
+        pieces_before_pc: Some(10 * usize::from(stage - 1)),
+    };
+    library
+        .candidates(stage, &query, finder)
+        .into_iter()
+        .map(|candidate| Shortlisted {
+            setup: candidate.setup_index,
+            progress: candidate.progress,
+            buildable: candidate.buildable,
+        })
+        .collect()
+}
+
+#[cfg(test)]
 fn konbini_guidance(
     library: &KonbiniLibrary,
     tracker: &SessionTracker,
     snapshot: &pc_overlay_core::tracker::Snapshot,
     index: &mut isize,
 ) -> (String, Vec<OverlayCell>) {
+    let shortlist = konbini_shortlist(library, &mut Finder::new(), tracker, snapshot);
+    konbini_render(library, snapshot, &shortlist, index)
+}
+
+/// The candidate at `index` (wrapped into range): status line and cells.
+fn konbini_render(
+    library: &KonbiniLibrary,
+    snapshot: &pc_overlay_core::tracker::Snapshot,
+    candidates: &[Shortlisted],
+    index: &mut isize,
+) -> (String, Vec<OverlayCell>) {
     let stage = snapshot.pc_ordinal.get();
     let label = konbini::stage_label(stage);
-    let pieces = pc_pieces(tracker, snapshot);
-    let candidates = library.candidates(stage, &pieces, &snapshot.observation.board);
     if candidates.is_empty() {
         return (
             format!(
-                "PC Overlay [Konbini {label}]: no setup matches the board and pieces ({} in sheet)",
+                "PC Overlay [Konbini {label}]: no buildable setup matches the board ({} in sheet)",
                 library.stage_count(stage)
             ),
             Vec::new(),
@@ -502,7 +578,7 @@ fn konbini_guidance(
     let position = index.rem_euclid(candidates.len() as isize) as usize;
     *index = position as isize;
     let candidate = &candidates[position];
-    let setup = candidate.setup;
+    let setup = &library.setups[candidate.setup];
     let sol = setup
         .sol_percent
         .map(|sol| format!(" {sol:.2}%"))
@@ -514,6 +590,8 @@ fn konbini_guidance(
     };
     let complete = if candidate.progress.complete() {
         " setup complete"
+    } else if candidate.buildable == Buildable::Sometimes {
+        " depends on next pieces"
     } else {
         ""
     };
@@ -1436,7 +1514,7 @@ mod tests {
         let snapshot = tracker.snapshots().last().unwrap();
         let (status, cells) = konbini_guidance(&library, &tracker, snapshot, &mut 0);
         assert!(
-            status.contains("no setup matches the board and pieces (2 in sheet)"),
+            status.contains("no buildable setup matches the board (2 in sheet)"),
             "{status}"
         );
         assert!(cells.is_empty());

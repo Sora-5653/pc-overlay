@@ -251,8 +251,8 @@ restores the setting that state had. The detail line ends with `solve ON` or
 
 A second display mode shows setups for every PC (1st to 7th) from the public
 [Setup Konbini](https://docs.google.com/spreadsheets/d/1tI9fPeeEEEhWS2h0Gzib5UIjLKN33wd18WQSKRjxYMw/edit)
-spreadsheet instead of the 2nd-PC guidance above. It only displays setups;
-it does not search for solves.
+spreadsheet instead of the 2nd-PC guidance above. It shows only setups the
+live HOLD and queue can build; it does not search for solves.
 
 - `Ctrl+Alt+K` turns the mode ON / OFF. The first time, the sheets are read
   from `data/konbini/`, or downloaded in the background when that folder is
@@ -275,16 +275,44 @@ for the 1st to 7th PC, and every one decodes into whole tetrominoes
 
 The sheet for the tracked PC number is used. A setup is a candidate when
 
-- the PC can supply its pieces: a setup of `k` pieces must come from the first
-  `k + 1` pieces from the PC start (HOLD first, one HOLD slot), with pieces not
-  yet in NEXT counted as any piece, and
-- every block on the board is one of its cells with the same colour.
+- the PC can supply its pieces (a quick filter): a setup of `k` pieces must
+  come from the first `k + 1` pieces from the PC start (HOLD first, one HOLD
+  slot),
+- the board is the setup in progress: every block is one of its cells with
+  the same colour. Rows the setup fills clear in the game but stay in the
+  sheet's drawing (179 setups do this), so cleared rows are inferred and
+  the remaining cells are drawn where they are on the live board, and
+- it can still be built from the live HOLD, Current, and NEXT
+  (`src/finder.rs`).
 
-Candidates are ordered by the sheet's `SOL` rate. The remaining cells are
-drawn like setup guidance (filled for the Current piece). Frames that are not
-stable draw nothing. Not covered yet: whether the queue can actually build a
-setup in order (SRS, HOLD timing), the sheets' cover data, and the solves.
-Queue-aware search is planned with knewjade's solution-finder using SRS+.
+The build search follows knewjade's solution-finder: a bitboard field, a
+move generator that finds every lockable placement of a piece by a BFS over
+position and rotation (shift, soft drop, 90 and 180-degree rotation with
+TETR.IO's SRS+ kicks, cached per field and piece), and a depth-first search
+over the piece order with one HOLD slot that memoises failed states. Two
+prunings cut the search: HOLD plus the rest of the queue must still hold a
+piece for every unplaced coloured tetromino, and, for setups without line
+clears, the unplaced cells must split into groups of a multiple of 4 cells.
+The SRS+ tables are TETR.IO's as reproduced by the TETR.IO engine
+reimplementation triangle.js (`src/engine/utils/kicks/data.ts`, y down,
+tried after the unkicked rotation); solution-finder ships no SRS+ table.
+
+A setup of 7 pieces needs one or two pieces after NEXT. Their options come
+from the 7-bag, assuming a perfect-clear loop (10 pieces per PC). A setup
+buildable for every option is shown first; one buildable for some is shown
+after them with `depends on next pieces`. As in solution-finder's
+percentages, each option is judged with the whole queue known. Candidates
+are then ordered by the sheet's `SOL` rate and drawn like setup guidance
+(filled for the Current piece). Frames that are not stable draw nothing.
+A state is searched once and reused until the board, HOLD, or queue changes.
+
+Checks (`tests/konbini_data.rs`, with the cache): every one of the 2424
+setups drawn in colour is buildable in some order of its own pieces; over
+every order, 88.4% of orders build on average and 1489 setups build in every
+order. From each PC's start with random 7-bag queues and a cold cache, the
+search takes 0.1-8 ms on average and 26 ms at worst (5th PC), measured by
+`cargo run --release --example konbini_timing`. Not checked in TETR.IO yet.
+The solves after the setup and the sheets' cover data are not used.
 
 ## TETR.IO display-scale calibration
 
@@ -348,8 +376,8 @@ without changing any session state.
    `tools/build_cases.py` (see "Generated cases"). Not yet tried in TETR.IO.
 6. Planned: integrate knewjade's solution-finder to show several solves at
    once and to support SRS+ (180-degree rotation). The same search would
-   also rank Setup Konbini setups for the actual queue (see
-   "Setup Konbini mode", which only displays them for now). Until then solves come
+   also find the solves after a Setup Konbini setup; the setups themselves
+   are already checked for the live queue (see "Setup Konbini mode"). Until then solves come
    only from the source diagrams, checked with SRS 90-degree movement by
    `tools/ijlo_solves.py`.
 
