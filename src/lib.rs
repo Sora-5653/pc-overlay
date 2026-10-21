@@ -8,6 +8,7 @@ pub mod calibration;
 pub mod capture;
 pub mod condition;
 pub mod diagram;
+pub mod engine;
 pub mod finder;
 pub mod fumen;
 pub mod guidance;
@@ -17,8 +18,10 @@ pub mod overlay;
 pub mod recognition;
 pub mod roi;
 pub mod rules;
+pub mod seed;
 pub mod stability;
 pub mod tracker;
+pub mod ttrm;
 pub mod window;
 
 pub use capture::{CaptureError, CapturedFrame};

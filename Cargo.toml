@@ -7,7 +7,7 @@ license = "MIT"
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+serde_json = { version = "1.0", features = ["float_roundtrip"] }
 thiserror = "2.0"
 
 [dev-dependencies]
@@ -57,3 +57,11 @@ path = "src/bin/fetch_konbini.rs"
 [[bin]]
 name = "probe-recognition"
 path = "src/bin/probe_recognition.rs"
+
+[[bin]]
+name = "verify-ttrm"
+path = "src/bin/verify_ttrm.rs"
+
+[[bin]]
+name = "recover-seed"
+path = "src/bin/recover_seed.rs"
