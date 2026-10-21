@@ -247,19 +247,47 @@ solve, and placed solve pieces drop out as rows clear. A PC boundary or a
 restores the setting that state had. The detail line ends with `solve ON` or
 `solve OFF`.
 
-## Setup Konbini mode
+## Unified guidance (source rules + Setup Konbini)
 
-A second display mode shows setups for every PC (1st to 7th) from the public
+Since 2026-10-21 `run-overlay` shows one guidance without a mode switch
+(the former `Ctrl+Alt+K` Setup Konbini mode is merged into it):
+
+- 2nd PC: the source rules above (`data/ijlo.json`, `data/cases/*.json`)
+  come first. When they have no data for the case, or select no setup for
+  the board and queue, the 2nd-PC Setup Konbini setups the live queue can
+  build are shown instead, and the detail line says why
+  (`guide=Konbini (source: ...)`).
+- Every other PC: the Setup Konbini setups for that PC number.
+- The status line names the origin: `PC Overlay [source]: ...` or
+  `PC Overlay [Konbini 2nd]: ...`; the detail line ends with
+  `guide=source` / `guide=Konbini`.
+
+Hotkeys (changes from the two-mode version in bold):
+
+| Key | Action |
+|---|---|
+| `S` / `Ctrl+Alt+S` | show / toggle the solve once the setup is complete (as before) |
+| `Ctrl+Alt+1..7` | resynchronize the PC number (as before) |
+| `Ctrl+Alt+N` / `Ctrl+Alt+B` | next / previous Setup Konbini candidate; **now always active**, back to the best candidate when a new PC starts |
+| **`Ctrl+Alt+K`** | **was: Setup Konbini mode ON/OFF. Now: the 2nd PC uses Setup Konbini even when source rules apply (press again to go back)** |
+| `Ctrl+Alt+F` | download the sheets again (as before) |
+
+The sheets are read from `data/konbini/` at startup, and **downloaded in the
+background at startup when that folder is empty** (previously on the first
+`Ctrl+Alt+K`); the status line shows `fetching Setup Konbini...` meanwhile.
+A completed Konbini setup reads `setup complete (no solve data)`: solves
+for Konbini setups come from the solve search (next section).
+
+Tests: `cargo test --bin run-overlay` covers source-first on the 2nd PC,
+the `Ctrl+Alt+K` override, fallback with the reason in the note, other PCs,
+completed source setups enabling `S`, and the missing-data message.
+Not tried in TETR.IO yet.
+
+### Setup Konbini data and build search
+
+Setups for every PC (1st to 7th) come from the public
 [Setup Konbini](https://docs.google.com/spreadsheets/d/1tI9fPeeEEEhWS2h0Gzib5UIjLKN33wd18WQSKRjxYMw/edit)
-spreadsheet instead of the 2nd-PC guidance above. It shows only setups the
-live HOLD and queue can build; it does not search for solves.
-
-- `Ctrl+Alt+K` turns the mode ON / OFF. The first time, the sheets are read
-  from `data/konbini/`, or downloaded in the background when that folder is
-  empty (the status line shows `fetching Setup Konbini...`).
-- `Ctrl+Alt+N` / `Ctrl+Alt+B` show the next / previous candidate. The choice
-  goes back to the best candidate when a new PC starts.
-- `Ctrl+Alt+F` downloads the sheets again.
+spreadsheet. Only setups the live HOLD and queue can build are shown.
 
 `cargo run --bin fetch-konbini` downloads the same files from the console.
 Each `Nth: Data` sheet is fetched as CSV with the system `curl`
@@ -378,7 +406,7 @@ without changing any session state.
 6. Planned: integrate knewjade's solution-finder to show several solves at
    once and to support SRS+ (180-degree rotation). The same search would
    also find the solves after a Setup Konbini setup; the setups themselves
-   are already checked for the live queue (see "Setup Konbini mode"). Until then solves come
+   are already checked for the live queue (see "Unified guidance"). Until then solves come
    only from the source diagrams, checked with SRS 90-degree movement by
    `tools/ijlo_solves.py`.
 7. TODO (found 2026-10-21): resetting the board with `R` in TETR.IO breaks
