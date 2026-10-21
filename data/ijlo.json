@@ -1,0 +1,1240 @@
+{
+  "schema_version": 1,
+  "case": {
+    "id": "IJLO",
+    "family": "even_jl_no_t",
+    "source": {
+      "document": "Algebruh's 2nd Methods.md",
+      "lines": [
+        20,
+        32
+      ],
+      "images": [
+        "image1",
+        "image2",
+        "image3",
+        "image4",
+        "image5",
+        "image6",
+        "image7",
+        "image8",
+        "image9",
+        "image10",
+        "image11",
+        "image12",
+        "image13",
+        "image14",
+        "image15"
+      ],
+      "note": "Setup and solve cells are transcribed in data/ijlo/diagram_cells.json and were reviewed against the source raster on 2026-10-18. Conditions are evaluated over the bag that follows the four IJLO case pieces."
+    }
+  },
+  "methods": [
+    {
+      "id": "ijlo_source_method",
+      "source_order": 1,
+      "category": "save_o",
+      "setups": [
+        {
+          "id": "ijlo_s_queue",
+          "source_order": 1,
+          "local_priority": 1,
+          "setup_piece_count": 4,
+          "review_status": "verified",
+          "build_condition": {
+            "op": "seen",
+            "piece": "S"
+          },
+          "fail_condition": {
+            "op": "last_among",
+            "piece": "S",
+            "pieces": [
+              "T",
+              "J"
+            ]
+          },
+          "save": "T",
+          "placements": [
+            {
+              "piece": "I",
+              "cells": [
+                {
+                  "x": 2,
+                  "y": 0
+                },
+                {
+                  "x": 3,
+                  "y": 0
+                },
+                {
+                  "x": 4,
+                  "y": 0
+                },
+                {
+                  "x": 5,
+                  "y": 0
+                }
+              ]
+            },
+            {
+              "piece": "J",
+              "cells": [
+                {
+                  "x": 2,
+                  "y": 2
+                },
+                {
+                  "x": 2,
+                  "y": 1
+                },
+                {
+                  "x": 3,
+                  "y": 1
+                },
+                {
+                  "x": 4,
+                  "y": 1
+                }
+              ]
+            },
+            {
+              "piece": "L",
+              "cells": [
+                {
+                  "x": 6,
+                  "y": 2
+                },
+                {
+                  "x": 6,
+                  "y": 1
+                },
+                {
+                  "x": 6,
+                  "y": 0
+                },
+                {
+                  "x": 7,
+                  "y": 0
+                }
+              ]
+            },
+            {
+              "piece": "O",
+              "cells": [
+                {
+                  "x": 0,
+                  "y": 1
+                },
+                {
+                  "x": 1,
+                  "y": 1
+                },
+                {
+                  "x": 0,
+                  "y": 0
+                },
+                {
+                  "x": 1,
+                  "y": 0
+                }
+              ]
+            }
+          ],
+          "solves": [
+            {
+              "id": "ijlo_s_queue_solve_1",
+              "source_order": 1,
+              "review_status": "verified",
+              "condition": {
+                "op": "always"
+              },
+              "target": [
+                {
+                  "piece": "S",
+                  "cells": [
+                    {
+                      "x": 7,
+                      "y": 2
+                    },
+                    {
+                      "x": 7,
+                      "y": 1
+                    },
+                    {
+                      "x": 8,
+                      "y": 1
+                    },
+                    {
+                      "x": 8,
+                      "y": 0
+                    }
+                  ]
+                },
+                {
+                  "piece": "I",
+                  "cells": [
+                    {
+                      "x": 9,
+                      "y": 3
+                    },
+                    {
+                      "x": 9,
+                      "y": 2
+                    },
+                    {
+                      "x": 9,
+                      "y": 1
+                    },
+                    {
+                      "x": 9,
+                      "y": 0
+                    }
+                  ]
+                },
+                {
+                  "piece": "J",
+                  "cells": [
+                    {
+                      "x": 6,
+                      "y": 3
+                    },
+                    {
+                      "x": 7,
+                      "y": 3
+                    },
+                    {
+                      "x": 8,
+                      "y": 3
+                    },
+                    {
+                      "x": 8,
+                      "y": 2
+                    }
+                  ]
+                },
+                {
+                  "piece": "L",
+                  "cells": [
+                    {
+                      "x": 4,
+                      "y": 3
+                    },
+                    {
+                      "x": 5,
+                      "y": 3
+                    },
+                    {
+                      "x": 5,
+                      "y": 2
+                    },
+                    {
+                      "x": 5,
+                      "y": 1
+                    }
+                  ]
+                },
+                {
+                  "piece": "O",
+                  "cells": [
+                    {
+                      "x": 0,
+                      "y": 3
+                    },
+                    {
+                      "x": 1,
+                      "y": 3
+                    },
+                    {
+                      "x": 0,
+                      "y": 2
+                    },
+                    {
+                      "x": 1,
+                      "y": 2
+                    }
+                  ]
+                },
+                {
+                  "piece": "Z",
+                  "cells": [
+                    {
+                      "x": 2,
+                      "y": 3
+                    },
+                    {
+                      "x": 3,
+                      "y": 3
+                    },
+                    {
+                      "x": 3,
+                      "y": 2
+                    },
+                    {
+                      "x": 4,
+                      "y": 2
+                    }
+                  ]
+                }
+              ],
+              "source": {
+                "document": "Algebruh's 2nd Methods.md",
+                "lines": [
+                  25,
+                  27
+                ],
+                "images": [
+                  "image5",
+                  "image6"
+                ],
+                "note": "Cells reviewed 2026-10-18. tools/verify_ijlo_solves.py searched SRS 90-degree movement (standard kicks, no 180-degree rotation) with one HOLD slot keeping T: the solve is reachable for every next-bag order that does not match this setup's fail condition, and for none that does, whether HOLD was empty or occupied at the PC start. Placement order is left to the player."
+              }
+            }
+          ],
+          "source": {
+            "document": "Algebruh's 2nd Methods.md",
+            "lines": [
+              25,
+              27
+            ],
+            "images": [
+              "image4"
+            ],
+            "note": "Source states save T and failure on [TJ]!,S. Line 39 adds that this setup is for S before J; image 6 rests J directly on S, which fixes the image mapping. The failure is recorded as 'T and J both before S' (user decision 2026-10-18), because T is held and J cannot be placed before S. build_condition only orders this setup against the Z setup by which key piece appears first; it is a tie-break, not a source condition."
+          }
+        },
+        {
+          "id": "ijlo_z_queue",
+          "source_order": 2,
+          "local_priority": 1,
+          "setup_piece_count": 4,
+          "review_status": "verified",
+          "build_condition": {
+            "op": "seen",
+            "piece": "Z"
+          },
+          "fail_condition": {
+            "op": "last_among",
+            "piece": "Z",
+            "pieces": [
+              "T",
+              "L"
+            ]
+          },
+          "save": "T",
+          "placements": [
+            {
+              "piece": "I",
+              "cells": [
+                {
+                  "x": 4,
+                  "y": 0
+                },
+                {
+                  "x": 5,
+                  "y": 0
+                },
+                {
+                  "x": 6,
+                  "y": 0
+                },
+                {
+                  "x": 7,
+                  "y": 0
+                }
+              ]
+            },
+            {
+              "piece": "J",
+              "cells": [
+                {
+                  "x": 3,
+                  "y": 2
+                },
+                {
+                  "x": 3,
+                  "y": 1
+                },
+                {
+                  "x": 2,
+                  "y": 0
+                },
+                {
+                  "x": 3,
+                  "y": 0
+                }
+              ]
+            },
+            {
+              "piece": "L",
+              "cells": [
+                {
+                  "x": 7,
+                  "y": 2
+                },
+                {
+                  "x": 5,
+                  "y": 1
+                },
+                {
+                  "x": 6,
+                  "y": 1
+                },
+                {
+                  "x": 7,
+                  "y": 1
+                }
+              ]
+            },
+            {
+              "piece": "O",
+              "cells": [
+                {
+                  "x": 8,
+                  "y": 1
+                },
+                {
+                  "x": 9,
+                  "y": 1
+                },
+                {
+                  "x": 8,
+                  "y": 0
+                },
+                {
+                  "x": 9,
+                  "y": 0
+                }
+              ]
+            }
+          ],
+          "solves": [
+            {
+              "id": "ijlo_z_queue_solve_1",
+              "source_order": 1,
+              "review_status": "verified",
+              "condition": {
+                "op": "always"
+              },
+              "target": [
+                {
+                  "piece": "Z",
+                  "cells": [
+                    {
+                      "x": 2,
+                      "y": 2
+                    },
+                    {
+                      "x": 1,
+                      "y": 1
+                    },
+                    {
+                      "x": 2,
+                      "y": 1
+                    },
+                    {
+                      "x": 1,
+                      "y": 0
+                    }
+                  ]
+                },
+                {
+                  "piece": "I",
+                  "cells": [
+                    {
+                      "x": 0,
+                      "y": 3
+                    },
+                    {
+                      "x": 0,
+                      "y": 2
+                    },
+                    {
+                      "x": 0,
+                      "y": 1
+                    },
+                    {
+                      "x": 0,
+                      "y": 0
+                    }
+                  ]
+                },
+                {
+                  "piece": "J",
+                  "cells": [
+                    {
+                      "x": 4,
+                      "y": 3
+                    },
+                    {
+                      "x": 5,
+                      "y": 3
+                    },
+                    {
+                      "x": 4,
+                      "y": 2
+                    },
+                    {
+                      "x": 4,
+                      "y": 1
+                    }
+                  ]
+                },
+                {
+                  "piece": "L",
+                  "cells": [
+                    {
+                      "x": 1,
+                      "y": 3
+                    },
+                    {
+                      "x": 2,
+                      "y": 3
+                    },
+                    {
+                      "x": 3,
+                      "y": 3
+                    },
+                    {
+                      "x": 1,
+                      "y": 2
+                    }
+                  ]
+                },
+                {
+                  "piece": "O",
+                  "cells": [
+                    {
+                      "x": 8,
+                      "y": 3
+                    },
+                    {
+                      "x": 9,
+                      "y": 3
+                    },
+                    {
+                      "x": 8,
+                      "y": 2
+                    },
+                    {
+                      "x": 9,
+                      "y": 2
+                    }
+                  ]
+                },
+                {
+                  "piece": "S",
+                  "cells": [
+                    {
+                      "x": 6,
+                      "y": 3
+                    },
+                    {
+                      "x": 7,
+                      "y": 3
+                    },
+                    {
+                      "x": 5,
+                      "y": 2
+                    },
+                    {
+                      "x": 6,
+                      "y": 2
+                    }
+                  ]
+                }
+              ],
+              "source": {
+                "document": "Algebruh's 2nd Methods.md",
+                "lines": [
+                  25,
+                  27
+                ],
+                "images": [
+                  "image2",
+                  "image3"
+                ],
+                "note": "Cells reviewed 2026-10-18. tools/verify_ijlo_solves.py searched SRS 90-degree movement (standard kicks, no 180-degree rotation) with one HOLD slot keeping T: the solve is reachable for every next-bag order that does not match this setup's fail condition, and for none that does, whether HOLD was empty or occupied at the PC start. Placement order is left to the player."
+              }
+            }
+          ],
+          "source": {
+            "document": "Algebruh's 2nd Methods.md",
+            "lines": [
+              25,
+              27
+            ],
+            "images": [
+              "image1"
+            ],
+            "note": "Source states save T and failure on [TL]!,Z. Line 39 adds that this setup is for Z before L; image 3 rests L directly on Z, which fixes the image mapping. The failure is recorded as 'T and L both before Z' (user decision 2026-10-18), because T is held and L cannot be placed before Z. build_condition only orders this setup against the S setup by which key piece appears first; it is a tie-break, not a source condition."
+          }
+        },
+        {
+          "id": "ijlo_save_o_left",
+          "source_order": 3,
+          "local_priority": 2,
+          "setup_piece_count": 4,
+          "review_status": "verified",
+          "build_condition": {
+            "op": "all",
+            "conditions": [
+              {
+                "op": "ordered_with_hold",
+                "saved": "O",
+                "prerequisites": [
+                  {
+                    "first": "J",
+                    "then": "I"
+                  },
+                  {
+                    "first": "T",
+                    "then": "Z"
+                  },
+                  {
+                    "first": "T",
+                    "then": "L"
+                  },
+                  {
+                    "first": "J",
+                    "then": "L"
+                  }
+                ]
+              },
+              {
+                "op": "last_among",
+                "piece": "S",
+                "pieces": [
+                  "T",
+                  "J"
+                ]
+              },
+              {
+                "op": "last_among",
+                "piece": "Z",
+                "pieces": [
+                  "T",
+                  "L"
+                ]
+              }
+            ]
+          },
+          "save": "O",
+          "placements": [
+            {
+              "piece": "I",
+              "cells": [
+                {
+                  "x": 4,
+                  "y": 0
+                },
+                {
+                  "x": 5,
+                  "y": 0
+                },
+                {
+                  "x": 6,
+                  "y": 0
+                },
+                {
+                  "x": 7,
+                  "y": 0
+                }
+              ]
+            },
+            {
+              "piece": "J",
+              "cells": [
+                {
+                  "x": 9,
+                  "y": 2
+                },
+                {
+                  "x": 9,
+                  "y": 1
+                },
+                {
+                  "x": 8,
+                  "y": 0
+                },
+                {
+                  "x": 9,
+                  "y": 0
+                }
+              ]
+            },
+            {
+              "piece": "L",
+              "cells": [
+                {
+                  "x": 0,
+                  "y": 2
+                },
+                {
+                  "x": 0,
+                  "y": 1
+                },
+                {
+                  "x": 0,
+                  "y": 0
+                },
+                {
+                  "x": 1,
+                  "y": 0
+                }
+              ]
+            },
+            {
+              "piece": "O",
+              "cells": [
+                {
+                  "x": 4,
+                  "y": 2
+                },
+                {
+                  "x": 5,
+                  "y": 2
+                },
+                {
+                  "x": 4,
+                  "y": 1
+                },
+                {
+                  "x": 5,
+                  "y": 1
+                }
+              ]
+            }
+          ],
+          "solves": [
+            {
+              "id": "ijlo_save_o_left_solve_1",
+              "source_order": 1,
+              "review_status": "verified",
+              "condition": {
+                "op": "always"
+              },
+              "target": [
+                {
+                  "piece": "J",
+                  "cells": [
+                    {
+                      "x": 6,
+                      "y": 2
+                    },
+                    {
+                      "x": 6,
+                      "y": 1
+                    },
+                    {
+                      "x": 7,
+                      "y": 1
+                    },
+                    {
+                      "x": 8,
+                      "y": 1
+                    }
+                  ]
+                },
+                {
+                  "piece": "T",
+                  "cells": [
+                    {
+                      "x": 1,
+                      "y": 1
+                    },
+                    {
+                      "x": 2,
+                      "y": 1
+                    },
+                    {
+                      "x": 3,
+                      "y": 1
+                    },
+                    {
+                      "x": 2,
+                      "y": 0
+                    }
+                  ]
+                },
+                {
+                  "piece": "I",
+                  "cells": [
+                    {
+                      "x": 4,
+                      "y": 3
+                    },
+                    {
+                      "x": 5,
+                      "y": 3
+                    },
+                    {
+                      "x": 6,
+                      "y": 3
+                    },
+                    {
+                      "x": 7,
+                      "y": 3
+                    }
+                  ]
+                },
+                {
+                  "piece": "L",
+                  "cells": [
+                    {
+                      "x": 2,
+                      "y": 3
+                    },
+                    {
+                      "x": 3,
+                      "y": 3
+                    },
+                    {
+                      "x": 3,
+                      "y": 2
+                    },
+                    {
+                      "x": 3,
+                      "y": 0
+                    }
+                  ]
+                },
+                {
+                  "piece": "S",
+                  "cells": [
+                    {
+                      "x": 8,
+                      "y": 3
+                    },
+                    {
+                      "x": 9,
+                      "y": 3
+                    },
+                    {
+                      "x": 7,
+                      "y": 2
+                    },
+                    {
+                      "x": 8,
+                      "y": 2
+                    }
+                  ]
+                },
+                {
+                  "piece": "Z",
+                  "cells": [
+                    {
+                      "x": 0,
+                      "y": 3
+                    },
+                    {
+                      "x": 1,
+                      "y": 3
+                    },
+                    {
+                      "x": 1,
+                      "y": 2
+                    },
+                    {
+                      "x": 2,
+                      "y": 2
+                    }
+                  ]
+                }
+              ],
+              "source": {
+                "document": "Algebruh's 2nd Methods.md",
+                "lines": [
+                  28,
+                  30
+                ],
+                "images": [
+                  "image8",
+                  "image9"
+                ],
+                "note": "Cells come from the reviewed diagram transcription. tools/ijlo_solves.py verify confirms the solve is reachable with SRS 90-degree movement exactly for the bag orders accepted by the setup build_condition."
+              }
+            }
+          ],
+          "source": {
+            "document": "Algebruh's 2nd Methods.md",
+            "lines": [
+              28,
+              30
+            ],
+            "images": [
+              "image7"
+            ],
+            "note": "Source states this pair saves O and is used when the S/Z queue setups cannot be built; it gives no queue condition and no rule for choosing left or right. build_condition is derived, not quoted: placing the solve without HOLD requires I rests on J, Z on T, and L passes through row y=1, which only the image 8 T and J complete. tools/ijlo_solves.py verify plays all 5040 orders of the following bag (HOLD empty or occupied at the PC start) with SRS 90-degree movement and checks that the solve is reachable exactly when these prerequisites can be met with one HOLD slot (1344 orders). The two last_among terms are the S and Z queue fail conditions: the source uses this pair only when those setups cannot be built, so save O waits until both have failed. When both sides qualify, source order picks the left one (verified 2026-10-18)."
+          }
+        },
+        {
+          "id": "ijlo_save_o_right",
+          "source_order": 4,
+          "local_priority": 2,
+          "setup_piece_count": 4,
+          "review_status": "verified",
+          "build_condition": {
+            "op": "all",
+            "conditions": [
+              {
+                "op": "ordered_with_hold",
+                "saved": "O",
+                "prerequisites": [
+                  {
+                    "first": "L",
+                    "then": "I"
+                  },
+                  {
+                    "first": "T",
+                    "then": "S"
+                  },
+                  {
+                    "first": "T",
+                    "then": "J"
+                  },
+                  {
+                    "first": "L",
+                    "then": "J"
+                  }
+                ]
+              },
+              {
+                "op": "last_among",
+                "piece": "S",
+                "pieces": [
+                  "T",
+                  "J"
+                ]
+              },
+              {
+                "op": "last_among",
+                "piece": "Z",
+                "pieces": [
+                  "T",
+                  "L"
+                ]
+              }
+            ]
+          },
+          "save": "O",
+          "placements": [
+            {
+              "piece": "I",
+              "cells": [
+                {
+                  "x": 2,
+                  "y": 0
+                },
+                {
+                  "x": 3,
+                  "y": 0
+                },
+                {
+                  "x": 4,
+                  "y": 0
+                },
+                {
+                  "x": 5,
+                  "y": 0
+                }
+              ]
+            },
+            {
+              "piece": "J",
+              "cells": [
+                {
+                  "x": 9,
+                  "y": 2
+                },
+                {
+                  "x": 9,
+                  "y": 1
+                },
+                {
+                  "x": 8,
+                  "y": 0
+                },
+                {
+                  "x": 9,
+                  "y": 0
+                }
+              ]
+            },
+            {
+              "piece": "L",
+              "cells": [
+                {
+                  "x": 0,
+                  "y": 2
+                },
+                {
+                  "x": 0,
+                  "y": 1
+                },
+                {
+                  "x": 0,
+                  "y": 0
+                },
+                {
+                  "x": 1,
+                  "y": 0
+                }
+              ]
+            },
+            {
+              "piece": "O",
+              "cells": [
+                {
+                  "x": 4,
+                  "y": 2
+                },
+                {
+                  "x": 5,
+                  "y": 2
+                },
+                {
+                  "x": 4,
+                  "y": 1
+                },
+                {
+                  "x": 5,
+                  "y": 1
+                }
+              ]
+            }
+          ],
+          "solves": [
+            {
+              "id": "ijlo_save_o_right_solve_1",
+              "source_order": 1,
+              "review_status": "verified",
+              "condition": {
+                "op": "always"
+              },
+              "target": [
+                {
+                  "piece": "L",
+                  "cells": [
+                    {
+                      "x": 3,
+                      "y": 2
+                    },
+                    {
+                      "x": 1,
+                      "y": 1
+                    },
+                    {
+                      "x": 2,
+                      "y": 1
+                    },
+                    {
+                      "x": 3,
+                      "y": 1
+                    }
+                  ]
+                },
+                {
+                  "piece": "T",
+                  "cells": [
+                    {
+                      "x": 6,
+                      "y": 1
+                    },
+                    {
+                      "x": 7,
+                      "y": 1
+                    },
+                    {
+                      "x": 8,
+                      "y": 1
+                    },
+                    {
+                      "x": 7,
+                      "y": 0
+                    }
+                  ]
+                },
+                {
+                  "piece": "I",
+                  "cells": [
+                    {
+                      "x": 2,
+                      "y": 3
+                    },
+                    {
+                      "x": 3,
+                      "y": 3
+                    },
+                    {
+                      "x": 4,
+                      "y": 3
+                    },
+                    {
+                      "x": 5,
+                      "y": 3
+                    }
+                  ]
+                },
+                {
+                  "piece": "J",
+                  "cells": [
+                    {
+                      "x": 6,
+                      "y": 3
+                    },
+                    {
+                      "x": 7,
+                      "y": 3
+                    },
+                    {
+                      "x": 6,
+                      "y": 2
+                    },
+                    {
+                      "x": 6,
+                      "y": 0
+                    }
+                  ]
+                },
+                {
+                  "piece": "S",
+                  "cells": [
+                    {
+                      "x": 8,
+                      "y": 3
+                    },
+                    {
+                      "x": 9,
+                      "y": 3
+                    },
+                    {
+                      "x": 7,
+                      "y": 2
+                    },
+                    {
+                      "x": 8,
+                      "y": 2
+                    }
+                  ]
+                },
+                {
+                  "piece": "Z",
+                  "cells": [
+                    {
+                      "x": 0,
+                      "y": 3
+                    },
+                    {
+                      "x": 1,
+                      "y": 3
+                    },
+                    {
+                      "x": 1,
+                      "y": 2
+                    },
+                    {
+                      "x": 2,
+                      "y": 2
+                    }
+                  ]
+                }
+              ],
+              "source": {
+                "document": "Algebruh's 2nd Methods.md",
+                "lines": [
+                  28,
+                  30
+                ],
+                "images": [
+                  "image11",
+                  "image12"
+                ],
+                "note": "Cells come from the reviewed diagram transcription. tools/ijlo_solves.py verify confirms the solve is reachable with SRS 90-degree movement exactly for the bag orders accepted by the setup build_condition."
+              }
+            }
+          ],
+          "source": {
+            "document": "Algebruh's 2nd Methods.md",
+            "lines": [
+              28,
+              30
+            ],
+            "images": [
+              "image10"
+            ],
+            "note": "Source states this pair saves O and is used when the S/Z queue setups cannot be built; it gives no queue condition and no rule for choosing left or right. build_condition is derived, not quoted: placing the solve without HOLD requires I rests on L, S on T, and J passes through row y=1, which only the image 11 T and L complete. tools/ijlo_solves.py verify plays all 5040 orders of the following bag (HOLD empty or occupied at the PC start) with SRS 90-degree movement and checks that the solve is reachable exactly when these prerequisites can be met with one HOLD slot (1344 orders). The two last_among terms are the S and Z queue fail conditions: the source uses this pair only when those setups cannot be built, so save O waits until both have failed. When both sides qualify, source order picks the left one (verified 2026-10-18)."
+          }
+        },
+        {
+          "id": "ijlo_sandbox_extended",
+          "source_order": 5,
+          "local_priority": 3,
+          "setup_piece_count": 4,
+          "review_status": "review_required",
+          "build_condition": {
+            "op": "always"
+          },
+          "placements": [],
+          "solves": [
+            {
+              "id": "ijlo_sandbox_sz_order_1",
+              "source_order": 1,
+              "review_status": "review_required",
+              "condition": {
+                "op": "before",
+                "first": "S",
+                "second": "Z"
+              },
+              "target": [],
+              "source": {
+                "document": "Algebruh's 2nd Methods.md",
+                "lines": [
+                  31,
+                  32
+                ],
+                "images": [
+                  "image15"
+                ],
+                "note": "Prose says solves are based on SZ order. Image 15 rests Z on S and image 14 rests S on Z, so without spins image 15 is the S-before-Z solve. The source warns about skims and 180 spins, so this mapping still requires review."
+              }
+            },
+            {
+              "id": "ijlo_sandbox_zs_order_1",
+              "source_order": 2,
+              "review_status": "review_required",
+              "condition": {
+                "op": "before",
+                "first": "Z",
+                "second": "S"
+              },
+              "target": [],
+              "source": {
+                "document": "Algebruh's 2nd Methods.md",
+                "lines": [
+                  31,
+                  32
+                ],
+                "images": [
+                  "image14"
+                ],
+                "note": "Prose says solves are based on SZ order. Image 15 rests Z on S and image 14 rests S on Z, so without spins image 15 is the S-before-Z solve. The source warns about skims and 180 spins, so this mapping still requires review."
+              }
+            }
+          ],
+          "source": {
+            "document": "Algebruh's 2nd Methods.md",
+            "lines": [
+              31,
+              32
+            ],
+            "images": [
+              "image13"
+            ],
+            "note": "Four-piece extension is explicit. Both solves place no T, so the save is T. Trigger and solve conditions still require review."
+          },
+          "save": "T"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,55 @@
+[package]
+name = "pc-overlay-core"
+version = "0.1.0"
+edition = "2024"
+description = "Rule evaluation and session tracking core for a TETR.IO 2nd PC learning overlay"
+license = "MIT"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+
+[dev-dependencies]
+pretty_assertions = "1.4"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[[bin]]
+name = "validate-rules"
+path = "src/bin/validate_rules.rs"
+
+[[bin]]
+name = "validate-diagrams"
+path = "src/bin/validate_diagrams.rs"
+
+[[bin]]
+name = "probe-window"
+path = "src/bin/probe_window.rs"
+
+[[bin]]
+name = "probe-capture"
+path = "src/bin/probe_capture.rs"
+
+[[bin]]
+name = "run-live"
+path = "src/bin/run_live.rs"
+
+[[bin]]
+name = "run-overlay"
+path = "src/bin/run_overlay.rs"
+
+[[bin]]
+name = "configure-overlay"
+path = "src/bin/configure_overlay.rs"
+
+[[bin]]
+name = "probe-recognition"
+path = "src/bin/probe_recognition.rs"

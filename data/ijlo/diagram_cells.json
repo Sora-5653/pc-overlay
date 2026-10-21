@@ -1,0 +1,1478 @@
+{
+  "schema_version": 1,
+  "coordinate_system": {
+    "width": 10,
+    "origin": "bottom_left",
+    "y_increases": "up",
+    "source_cell_grid": "10 columns; image-local height is 4 or 5 rows"
+  },
+  "diagrams": [
+    {
+      "image": "image1",
+      "width": 10,
+      "height": 4,
+      "review_status": "review_required",
+      "placements": [
+        {
+          "piece": "I",
+          "cells": [
+            [
+              4,
+              0
+            ],
+            [
+              5,
+              0
+            ],
+            [
+              6,
+              0
+            ],
+            [
+              7,
+              0
+            ]
+          ]
+        },
+        {
+          "piece": "J",
+          "cells": [
+            [
+              3,
+              2
+            ],
+            [
+              3,
+              1
+            ],
+            [
+              2,
+              0
+            ],
+            [
+              3,
+              0
+            ]
+          ]
+        },
+        {
+          "piece": "L",
+          "cells": [
+            [
+              7,
+              2
+            ],
+            [
+              5,
+              1
+            ],
+            [
+              6,
+              1
+            ],
+            [
+              7,
+              1
+            ]
+          ]
+        },
+        {
+          "piece": "O",
+          "cells": [
+            [
+              8,
+              1
+            ],
+            [
+              9,
+              1
+            ],
+            [
+              8,
+              0
+            ],
+            [
+              9,
+              0
+            ]
+          ]
+        }
+      ],
+      "source": {
+        "document": "Algebruh's 2nd Methods.md",
+        "lines": [
+          25,
+          27
+        ],
+        "images": [
+          "image1"
+        ],
+        "note": "setup diagram"
+      }
+    },
+    {
+      "image": "image2",
+      "width": 10,
+      "height": 4,
+      "review_status": "review_required",
+      "placements": [
+        {
+          "piece": "Z",
+          "cells": [
+            [
+              2,
+              2
+            ],
+            [
+              1,
+              1
+            ],
+            [
+              2,
+              1
+            ],
+            [
+              1,
+              0
+            ]
+          ]
+        }
+      ],
+      "source": {
+        "document": "Algebruh's 2nd Methods.md",
+        "lines": [
+          25,
+          27
+        ],
+        "images": [
+          "image2"
+        ],
+        "note": "solve highlight; gray cells are source board context"
+      }
+    },
+    {
+      "image": "image3",
+      "width": 10,
+      "height": 5,
+      "review_status": "review_required",
+      "placements": [
+        {
+          "piece": "I",
+          "cells": [
+            [
+              0,
+              3
+            ],
+            [
+              0,
+              2
+            ],
+            [
+              0,
+              1
+            ],
+            [
+              0,
+              0
+            ]
+          ]
+        },
+        {
+          "piece": "J",
+          "cells": [
+            [
+              4,
+              3
+            ],
+            [
+              5,
+              3
+            ],
+            [
+              4,
+              2
+            ],
+            [
+              4,
+              1
+            ]
+          ]
+        },
+        {
+          "piece": "L",
+          "cells": [
+            [
+              1,
+              3
+            ],
+            [
+              2,
+              3
+            ],
+            [
+              3,
+              3
+            ],
+            [
+              1,
+              2
+            ]
+          ]
+        },
+        {
+          "piece": "O",
+          "cells": [
+            [
+              8,
+              3
+            ],
+            [
+              9,
+              3
+            ],
+            [
+              8,
+              2
+            ],
+            [
+              9,
+              2
+            ]
+          ]
+        },
+        {
+          "piece": "S",
+          "cells": [
+            [
+              6,
+              3
+            ],
+            [
+              7,
+              3
+            ],
+            [
+              5,
+              2
+            ],
+            [
+              6,
+              2
+            ]
+          ]
+        }
+      ],
+      "source": {
+        "document": "Algebruh's 2nd Methods.md",
+        "lines": [
+          25,
+          27
+        ],
+        "images": [
+          "image3"
+        ],
+        "note": "solve highlight"
+      }
+    },
+    {
+      "image": "image4",
+      "width": 10,
+      "height": 4,
+      "review_status": "review_required",
+      "placements": [
+        {
+          "piece": "I",
+          "cells": [
+            [
+              2,
+              0
+            ],
+            [
+              3,
+              0
+            ],
+            [
+              4,
+              0
+            ],
+            [
+              5,
+              0
+            ]
+          ]
+        },
+        {
+          "piece": "J",
+          "cells": [
+            [
+              2,
+              2
+            ],
+            [
+              2,
+              1
+            ],
+            [
+              3,
+              1
+            ],
+            [
+              4,
+              1
+            ]
+          ]
+        },
+        {
+          "piece": "L",
+          "cells": [
+            [
+              6,
+              2
+            ],
+            [
+              6,
+              1
+            ],
+            [
+              6,
+              0
+            ],
+            [
+              7,
+              0
+            ]
+          ]
+        },
+        {
+          "piece": "O",
+          "cells": [
+            [
+              0,
+              1
+            ],
+            [
+              1,
+              1
+            ],
+            [
+              0,
+              0
+            ],
+            [
+              1,
+              0
+            ]
+          ]
+        }
+      ],
+      "source": {
+        "document": "Algebruh's 2nd Methods.md",
+        "lines": [
+          25,
+          27
+        ],
+        "images": [
+          "image4"
+        ],
+        "note": "setup diagram"
+      }
+    },
+    {
+      "image": "image5",
+      "width": 10,
+      "height": 4,
+      "review_status": "review_required",
+      "placements": [
+        {
+          "piece": "S",
+          "cells": [
+            [
+              7,
+              2
+            ],
+            [
+              7,
+              1
+            ],
+            [
+              8,
+              1
+            ],
+            [
+              8,
+              0
+            ]
+          ]
+        }
+      ],
+      "source": {
+        "document": "Algebruh's 2nd Methods.md",
+        "lines": [
+          25,
+          27
+        ],
+        "images": [
+          "image5"
+        ],
+        "note": "solve highlight; gray cells are source board context"
+      }
+    },
+    {
+      "image": "image6",
+      "width": 10,
+      "height": 5,
+      "review_status": "review_required",
+      "placements": [
+        {
+          "piece": "I",
+          "cells": [
+            [
+              9,
+              3
+            ],
+            [
+              9,
+              2
+            ],
+            [
+              9,
+              1
+            ],
+            [
+              9,
+              0
+            ]
+          ]
+        },
+        {
+          "piece": "J",
+          "cells": [
+            [
+              6,
+              3
+            ],
+            [
+              7,
+              3
+            ],
+            [
+              8,
+              3
+            ],
+            [
+              8,
+              2
+            ]
+          ]
+        },
+        {
+          "piece": "L",
+          "cells": [
+            [
+              4,
+              3
+            ],
+            [
+              5,
+              3
+            ],
+            [
+              5,
+              2
+            ],
+            [
+              5,
+              1
+            ]
+          ]
+        },
+        {
+          "piece": "O",
+          "cells": [
+            [
+              0,
+              3
+            ],
+            [
+              1,
+              3
+            ],
+            [
+              0,
+              2
+            ],
+            [
+              1,
+              2
+            ]
+          ]
+        },
+        {
+          "piece": "Z",
+          "cells": [
+            [
+              2,
+              3
+            ],
+            [
+              3,
+              3
+            ],
+            [
+              3,
+              2
+            ],
+            [
+              4,
+              2
+            ]
+          ]
+        }
+      ],
+      "source": {
+        "document": "Algebruh's 2nd Methods.md",
+        "lines": [
+          25,
+          27
+        ],
+        "images": [
+          "image6"
+        ],
+        "note": "solve highlight"
+      }
+    },
+    {
+      "image": "image7",
+      "width": 10,
+      "height": 4,
+      "review_status": "review_required",
+      "placements": [
+        {
+          "piece": "I",
+          "cells": [
+            [
+              4,
+              0
+            ],
+            [
+              5,
+              0
+            ],
+            [
+              6,
+              0
+            ],
+            [
+              7,
+              0
+            ]
+          ]
+        },
+        {
+          "piece": "J",
+          "cells": [
+            [
+              9,
+              2
+            ],
+            [
+              9,
+              1
+            ],
+            [
+              8,
+              0
+            ],
+            [
+              9,
+              0
+            ]
+          ]
+        },
+        {
+          "piece": "L",
+          "cells": [
+            [
+              0,
+              2
+            ],
+            [
+              0,
+              1
+            ],
+            [
+              0,
+              0
+            ],
+            [
+              1,
+              0
+            ]
+          ]
+        },
+        {
+          "piece": "O",
+          "cells": [
+            [
+              4,
+              2
+            ],
+            [
+              5,
+              2
+            ],
+            [
+              4,
+              1
+            ],
+            [
+              5,
+              1
+            ]
+          ]
+        }
+      ],
+      "source": {
+        "document": "Algebruh's 2nd Methods.md",
+        "lines": [
+          28,
+          30
+        ],
+        "images": [
+          "image7"
+        ],
+        "note": "setup diagram"
+      }
+    },
+    {
+      "image": "image8",
+      "width": 10,
+      "height": 4,
+      "review_status": "review_required",
+      "placements": [
+        {
+          "piece": "J",
+          "cells": [
+            [
+              6,
+              2
+            ],
+            [
+              6,
+              1
+            ],
+            [
+              7,
+              1
+            ],
+            [
+              8,
+              1
+            ]
+          ]
+        },
+        {
+          "piece": "T",
+          "cells": [
+            [
+              1,
+              1
+            ],
+            [
+              2,
+              1
+            ],
+            [
+              3,
+              1
+            ],
+            [
+              2,
+              0
+            ]
+          ]
+        }
+      ],
+      "source": {
+        "document": "Algebruh's 2nd Methods.md",
+        "lines": [
+          28,
+          30
+        ],
+        "images": [
+          "image8"
+        ],
+        "note": "solve highlight; gray cells are source board context"
+      }
+    },
+    {
+      "image": "image9",
+      "width": 10,
+      "height": 5,
+      "review_status": "review_required",
+      "cleared_rows": [
+        1
+      ],
+      "placements": [
+        {
+          "piece": "I",
+          "cells": [
+            [
+              4,
+              3
+            ],
+            [
+              5,
+              3
+            ],
+            [
+              6,
+              3
+            ],
+            [
+              7,
+              3
+            ]
+          ]
+        },
+        {
+          "piece": "L",
+          "cells": [
+            [
+              2,
+              3
+            ],
+            [
+              3,
+              3
+            ],
+            [
+              3,
+              2
+            ],
+            [
+              3,
+              0
+            ]
+          ]
+        },
+        {
+          "piece": "S",
+          "cells": [
+            [
+              8,
+              3
+            ],
+            [
+              9,
+              3
+            ],
+            [
+              7,
+              2
+            ],
+            [
+              8,
+              2
+            ]
+          ]
+        },
+        {
+          "piece": "Z",
+          "cells": [
+            [
+              0,
+              3
+            ],
+            [
+              1,
+              3
+            ],
+            [
+              1,
+              2
+            ],
+            [
+              2,
+              2
+            ]
+          ]
+        }
+      ],
+      "source": {
+        "document": "Algebruh's 2nd Methods.md",
+        "lines": [
+          28,
+          30
+        ],
+        "images": [
+          "image9"
+        ],
+        "note": "solve highlight; row y=1 was completed by the image8 placements and cleared before this diagram's remaining pieces, but the source still draws it. The L passes through that cleared row; collapsing it yields a normal 180-degree tetromino. Reviewed 2026-10-18."
+      }
+    },
+    {
+      "image": "image10",
+      "width": 10,
+      "height": 4,
+      "review_status": "review_required",
+      "placements": [
+        {
+          "piece": "I",
+          "cells": [
+            [
+              2,
+              0
+            ],
+            [
+              3,
+              0
+            ],
+            [
+              4,
+              0
+            ],
+            [
+              5,
+              0
+            ]
+          ]
+        },
+        {
+          "piece": "J",
+          "cells": [
+            [
+              9,
+              2
+            ],
+            [
+              9,
+              1
+            ],
+            [
+              8,
+              0
+            ],
+            [
+              9,
+              0
+            ]
+          ]
+        },
+        {
+          "piece": "L",
+          "cells": [
+            [
+              0,
+              2
+            ],
+            [
+              0,
+              1
+            ],
+            [
+              0,
+              0
+            ],
+            [
+              1,
+              0
+            ]
+          ]
+        },
+        {
+          "piece": "O",
+          "cells": [
+            [
+              4,
+              2
+            ],
+            [
+              5,
+              2
+            ],
+            [
+              4,
+              1
+            ],
+            [
+              5,
+              1
+            ]
+          ]
+        }
+      ],
+      "source": {
+        "document": "Algebruh's 2nd Methods.md",
+        "lines": [
+          28,
+          30
+        ],
+        "images": [
+          "image10"
+        ],
+        "note": "setup diagram"
+      }
+    },
+    {
+      "image": "image11",
+      "width": 10,
+      "height": 4,
+      "review_status": "review_required",
+      "placements": [
+        {
+          "piece": "L",
+          "cells": [
+            [
+              3,
+              2
+            ],
+            [
+              1,
+              1
+            ],
+            [
+              2,
+              1
+            ],
+            [
+              3,
+              1
+            ]
+          ]
+        },
+        {
+          "piece": "T",
+          "cells": [
+            [
+              6,
+              1
+            ],
+            [
+              7,
+              1
+            ],
+            [
+              8,
+              1
+            ],
+            [
+              7,
+              0
+            ]
+          ]
+        }
+      ],
+      "source": {
+        "document": "Algebruh's 2nd Methods.md",
+        "lines": [
+          28,
+          30
+        ],
+        "images": [
+          "image11"
+        ],
+        "note": "solve highlight; gray cells are source board context"
+      }
+    },
+    {
+      "image": "image12",
+      "width": 10,
+      "height": 5,
+      "review_status": "review_required",
+      "cleared_rows": [
+        1
+      ],
+      "placements": [
+        {
+          "piece": "I",
+          "cells": [
+            [
+              2,
+              3
+            ],
+            [
+              3,
+              3
+            ],
+            [
+              4,
+              3
+            ],
+            [
+              5,
+              3
+            ]
+          ]
+        },
+        {
+          "piece": "J",
+          "cells": [
+            [
+              6,
+              3
+            ],
+            [
+              7,
+              3
+            ],
+            [
+              6,
+              2
+            ],
+            [
+              6,
+              0
+            ]
+          ]
+        },
+        {
+          "piece": "S",
+          "cells": [
+            [
+              8,
+              3
+            ],
+            [
+              9,
+              3
+            ],
+            [
+              7,
+              2
+            ],
+            [
+              8,
+              2
+            ]
+          ]
+        },
+        {
+          "piece": "Z",
+          "cells": [
+            [
+              0,
+              3
+            ],
+            [
+              1,
+              3
+            ],
+            [
+              1,
+              2
+            ],
+            [
+              2,
+              2
+            ]
+          ]
+        }
+      ],
+      "source": {
+        "document": "Algebruh's 2nd Methods.md",
+        "lines": [
+          28,
+          30
+        ],
+        "images": [
+          "image12"
+        ],
+        "note": "solve highlight; row y=1 was completed by the image11 placements and cleared before this diagram's remaining pieces, but the source still draws it. The J passes through that cleared row; collapsing it yields a normal 180-degree tetromino. Reviewed 2026-10-18."
+      }
+    },
+    {
+      "image": "image13",
+      "width": 10,
+      "height": 5,
+      "review_status": "review_required",
+      "placements": [
+        {
+          "piece": "I",
+          "cells": [
+            [
+              9,
+              3
+            ],
+            [
+              9,
+              2
+            ],
+            [
+              9,
+              1
+            ],
+            [
+              9,
+              0
+            ]
+          ]
+        },
+        {
+          "piece": "J",
+          "cells": [
+            [
+              0,
+              1
+            ],
+            [
+              0,
+              0
+            ],
+            [
+              1,
+              0
+            ],
+            [
+              2,
+              0
+            ]
+          ]
+        },
+        {
+          "piece": "L",
+          "cells": [
+            [
+              5,
+              1
+            ],
+            [
+              3,
+              0
+            ],
+            [
+              4,
+              0
+            ],
+            [
+              5,
+              0
+            ]
+          ]
+        },
+        {
+          "piece": "O",
+          "cells": [
+            [
+              7,
+              1
+            ],
+            [
+              8,
+              1
+            ],
+            [
+              7,
+              0
+            ],
+            [
+              8,
+              0
+            ]
+          ]
+        }
+      ],
+      "source": {
+        "document": "Algebruh's 2nd Methods.md",
+        "lines": [
+          31,
+          32
+        ],
+        "images": [
+          "image13"
+        ],
+        "note": "sandbox setup diagram"
+      }
+    },
+    {
+      "image": "image14",
+      "width": 10,
+      "height": 5,
+      "review_status": "review_required",
+      "placements": [
+        {
+          "piece": "I",
+          "cells": [
+            [
+              6,
+              3
+            ],
+            [
+              6,
+              2
+            ],
+            [
+              6,
+              1
+            ],
+            [
+              6,
+              0
+            ]
+          ]
+        },
+        {
+          "piece": "J",
+          "cells": [
+            [
+              1,
+              2
+            ],
+            [
+              1,
+              1
+            ],
+            [
+              2,
+              1
+            ],
+            [
+              3,
+              1
+            ]
+          ]
+        },
+        {
+          "piece": "L",
+          "cells": [
+            [
+              0,
+              3
+            ],
+            [
+              1,
+              3
+            ],
+            [
+              2,
+              3
+            ],
+            [
+              0,
+              2
+            ]
+          ]
+        },
+        {
+          "piece": "O",
+          "cells": [
+            [
+              7,
+              3
+            ],
+            [
+              8,
+              3
+            ],
+            [
+              7,
+              2
+            ],
+            [
+              8,
+              2
+            ]
+          ]
+        },
+        {
+          "piece": "S",
+          "cells": [
+            [
+              3,
+              3
+            ],
+            [
+              4,
+              3
+            ],
+            [
+              2,
+              2
+            ],
+            [
+              3,
+              2
+            ]
+          ]
+        },
+        {
+          "piece": "Z",
+          "cells": [
+            [
+              5,
+              3
+            ],
+            [
+              4,
+              2
+            ],
+            [
+              5,
+              2
+            ],
+            [
+              4,
+              1
+            ]
+          ]
+        }
+      ],
+      "source": {
+        "document": "Algebruh's 2nd Methods.md",
+        "lines": [
+          31,
+          32
+        ],
+        "images": [
+          "image14"
+        ],
+        "note": "solve highlight; gray cells are source board context"
+      }
+    },
+    {
+      "image": "image15",
+      "width": 10,
+      "height": 5,
+      "review_status": "review_required",
+      "placements": [
+        {
+          "piece": "I",
+          "cells": [
+            [
+              6,
+              3
+            ],
+            [
+              6,
+              2
+            ],
+            [
+              6,
+              1
+            ],
+            [
+              6,
+              0
+            ]
+          ]
+        },
+        {
+          "piece": "J",
+          "cells": [
+            [
+              3,
+              3
+            ],
+            [
+              4,
+              3
+            ],
+            [
+              5,
+              3
+            ],
+            [
+              5,
+              2
+            ]
+          ]
+        },
+        {
+          "piece": "L",
+          "cells": [
+            [
+              4,
+              2
+            ],
+            [
+              2,
+              1
+            ],
+            [
+              3,
+              1
+            ],
+            [
+              4,
+              1
+            ]
+          ]
+        },
+        {
+          "piece": "O",
+          "cells": [
+            [
+              7,
+              3
+            ],
+            [
+              8,
+              3
+            ],
+            [
+              7,
+              2
+            ],
+            [
+              8,
+              2
+            ]
+          ]
+        },
+        {
+          "piece": "S",
+          "cells": [
+            [
+              0,
+              3
+            ],
+            [
+              0,
+              2
+            ],
+            [
+              1,
+              2
+            ],
+            [
+              1,
+              1
+            ]
+          ]
+        },
+        {
+          "piece": "Z",
+          "cells": [
+            [
+              1,
+              3
+            ],
+            [
+              2,
+              3
+            ],
+            [
+              2,
+              2
+            ],
+            [
+              3,
+              2
+            ]
+          ]
+        }
+      ],
+      "source": {
+        "document": "Algebruh's 2nd Methods.md",
+        "lines": [
+          31,
+          32
+        ],
+        "images": [
+          "image15"
+        ],
+        "note": "solve highlight; gray cells are source board context"
+      }
+    }
+  ]
+}
