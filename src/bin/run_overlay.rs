@@ -11,10 +11,10 @@ use pc_overlay_core::{
     BoardCalibration, CommitOutcome, DiagramSet, FrameSize, OverlayBoard, OverlayCell,
     OverlayCellKind, OverlayState, OverlayWindow, Piece, RecognizerConfig, RuleSet, SessionTracker,
     SolveProgress, StabilityConfig, StabilityFilter, TetrioRecognizer, TrackerConfig, WindowInfo,
-    WindowLocator,
+    WindowLocator, board_is_empty,
     finder::{Buildable, Finder},
     konbini,
-    konbini::{BuildQuery, KonbiniLibrary, KonbiniProgress},
+    konbini::{BuildQuery, FoundSolve, KonbiniLibrary, KonbiniProgress},
     piece_code,
 };
 
@@ -452,7 +452,23 @@ struct KonbiniGuide {
     finder: Finder,
     /// Candidates of the last searched state, reused until it changes.
     shortlist: Option<(ShortlistKey, Vec<Shortlisted>)>,
+    /// Perfect clears found once a setup was built, while the board still
+    /// follows one of them.
+    solve: Option<SolveSession>,
+    /// The last state searched for a perfect clear, so a state without one
+    /// is searched once.
+    searched: Option<pc_overlay_core::Observation>,
 }
+
+/// Perfect clears found by the solve search, cycled by Ctrl+Alt+N / B.
+#[derive(Debug, Clone)]
+struct SolveSession {
+    solves: Vec<FoundSolve>,
+    index: isize,
+}
+
+/// Perfect clears kept per search.
+const SOLVE_LIMIT: usize = 100;
 
 /// What a shortlist depends on: PC number, observation, and PC pieces.
 type ShortlistKey = (u8, pc_overlay_core::Observation, Vec<Piece>);
@@ -479,6 +495,8 @@ impl KonbiniGuide {
             pc_key: None,
             finder: Finder::new(),
             shortlist: None,
+            solve: None,
+            searched: None,
         }
     }
 
@@ -499,9 +517,16 @@ impl KonbiniGuide {
         match hotkey {
             // Handled by the caller, which owns the preference.
             KonbiniHotkey::PreferKonbini => {}
-            KonbiniHotkey::Next => self.index += 1,
+            // With perfect clears found, N / B switch between them.
+            KonbiniHotkey::Next => match &mut self.solve {
+                Some(session) => session.index += 1,
+                None => self.index += 1,
+            },
             // Wraps to the last candidate once the count is known.
-            KonbiniHotkey::Previous => self.index -= 1,
+            KonbiniHotkey::Previous => match &mut self.solve {
+                Some(session) => session.index -= 1,
+                None => self.index -= 1,
+            },
             KonbiniHotkey::Refetch => {
                 if self.fetching.is_none() {
                     self.start_fetch();
@@ -560,6 +585,8 @@ impl KonbiniGuide {
         if pc_key != self.pc_key {
             self.pc_key = pc_key;
             self.index = 0;
+            self.solve = None;
+            self.searched = None;
         }
         let message = if self.fetching.is_some() {
             Some("fetching Setup Konbini...".to_string())
@@ -599,8 +626,109 @@ impl KonbiniGuide {
             self.shortlist = Some((key, shortlist));
         }
         let shortlist = &self.shortlist.as_ref().expect("just computed").1;
-        konbini_render(library, snapshot, shortlist, &mut self.index)
+        let observation = &snapshot.observation;
+        let show = tracker.guidance().show_solve;
+        if let Some(guide) = solve_guide(&mut self.solve, snapshot, show) {
+            return guide;
+        }
+        let guide = konbini_render(library, snapshot, shortlist, &mut self.index);
+        let shown_complete = usize::try_from(self.index)
+            .ok()
+            .and_then(|index| shortlist.get(index))
+            .is_some_and(|candidate| candidate.progress.complete());
+        let board_off_setup = shortlist.is_empty() && !board_is_empty(&observation.board);
+        if (shown_complete || board_off_setup) && self.searched.as_ref() != Some(observation) {
+            // A built setup, or a board no setup explains (the player went
+            // their own way): search the perfect clears from here.
+            self.searched = Some(observation.clone());
+            let solves = konbini::find_perfect_clears(&mut self.finder, observation, SOLVE_LIMIT);
+            if !solves.is_empty() {
+                self.solve = Some(SolveSession { solves, index: 0 });
+                if let Some(guide) = solve_guide(&mut self.solve, snapshot, show) {
+                    return guide;
+                }
+            }
+        }
+        if shown_complete || board_off_setup {
+            let stage = konbini::stage_label(snapshot.pc_ordinal.get());
+            let status = if shown_complete {
+                guide.status.replacen(
+                    " setup complete (no solve data)",
+                    " setup complete; no perfect clear with HOLD + NEXT",
+                    1,
+                )
+            } else {
+                format!(
+                    "PC Overlay [Konbini {stage}]: no setup matches the board and no perfect clear with HOLD + NEXT"
+                )
+            };
+            return Guide { status, ..guide };
+        }
+        guide
     }
+}
+
+/// The perfect clear the board follows, if a search found one: shown when
+/// the solve display is ON, announced otherwise. A board that follows none
+/// drops the session.
+fn solve_guide(
+    solve: &mut Option<SolveSession>,
+    snapshot: &pc_overlay_core::tracker::Snapshot,
+    show: bool,
+) -> Option<Guide> {
+    let observation = &snapshot.observation;
+    let stage = konbini::stage_label(snapshot.pc_ordinal.get());
+    let session = solve.as_mut()?;
+    let count = session.solves.len();
+    let start = session.index.rem_euclid(count as isize) as usize;
+    let Some((position, progress)) =
+        (0..count)
+            .map(|offset| (start + offset) % count)
+            .find_map(|position| {
+                session.solves[position]
+                    .progress(&observation.board)
+                    .map(|progress| (position, progress))
+            })
+    else {
+        *solve = None;
+        return None;
+    };
+    session.index = position as isize;
+    let height = session.solves[position].height;
+    let status = if show {
+        format!(
+            "PC Overlay [Konbini {stage}]: perfect clear {}/{count} (search, SRS+, {height} lines); Ctrl+Alt+N/B to switch",
+            position + 1
+        )
+    } else {
+        format!(
+            "PC Overlay [Konbini {stage}]: {count} perfect clear(s) found ({height} lines); press S to show the solve"
+        )
+    };
+    let cells = if show {
+        progress
+            .remaining
+            .iter()
+            .map(|cell| OverlayCell {
+                cell: cell.cell,
+                piece: cell.piece,
+                kind: if cell.piece == Some(observation.current) {
+                    OverlayCellKind::Current
+                } else {
+                    OverlayCellKind::Missing
+                },
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    Some(Guide {
+        status,
+        cells,
+        origin: Origin::Konbini,
+        setup_complete: true,
+        note: None,
+    })
 }
 
 /// The PC's pieces from its start: HOLD, then the queue disclosed since.
@@ -1804,5 +1932,96 @@ mod tests {
             guide.status
         );
         assert!(guide.note.is_none());
+    }
+
+    /// The 2nd PC after the 100% TILJ setup is built, with this HOLD and queue.
+    fn tilj_setup_built(hold: Option<Piece>, current: Piece, next5: [Piece; 5]) -> SessionTracker {
+        let library = konbini_library();
+        let setup = library
+            .setups
+            .iter()
+            .find(|setup| setup.sol_percent == Some(100.0))
+            .unwrap();
+        let mut tracker = tilj_pc_two();
+        let mut built = observation(hold, current, next5);
+        for cell in &setup.cells {
+            built.board[usize::from(cell.cell.y)][usize::from(cell.cell.x)] = cell.piece;
+        }
+        assert!(matches!(
+            tracker.commit(built, 0.75, 3),
+            CommitOutcome::Accepted { .. }
+        ));
+        tracker
+    }
+
+    #[test]
+    fn a_built_konbini_setup_gets_searched_perfect_clears() {
+        let mut mode = KonbiniGuide::new(PathBuf::from("unused"));
+        mode.library = Some(konbini_library());
+        let queue = [Piece::S, Piece::Z, Piece::I, Piece::T, Piece::L];
+        let mut tracker = tilj_setup_built(Some(Piece::J), Piece::O, queue);
+        let snapshot = tracker.snapshots().last().unwrap().clone();
+        let guide = mode.guide(&tracker, &snapshot);
+        assert!(
+            guide
+                .status
+                .contains("perfect clear(s) found (4 lines); press S"),
+            "{}",
+            guide.status
+        );
+        assert!(guide.setup_complete && guide.cells.is_empty());
+        let count = mode.solve.as_ref().unwrap().solves.len();
+        assert!(count >= 1);
+
+        // S shows the first solve: 24 cells over the 16 of the setup.
+        apply_solve_hotkey(&mut tracker, SolveHotkey::Show, guide.setup_complete);
+        let guide = mode.guide(&tracker, &snapshot);
+        assert!(
+            guide
+                .status
+                .contains(&format!("perfect clear 1/{count} (search, SRS+, 4 lines)")),
+            "{}",
+            guide.status
+        );
+        assert_eq!(guide.cells.len(), 24);
+        let coloured = |cells: &[OverlayCell]| -> BTreeSet<(Cell, Option<Piece>)> {
+            cells.iter().map(|cell| (cell.cell, cell.piece)).collect()
+        };
+        let first = coloured(&guide.cells);
+
+        // N switches to the next solve when there is one.
+        mode.apply(KonbiniHotkey::Next);
+        let guide = mode.guide(&tracker, &snapshot);
+        if count > 1 {
+            assert!(
+                guide.status.contains(&format!("2/{count}")),
+                "{}",
+                guide.status
+            );
+            assert_ne!(coloured(&guide.cells), first);
+        }
+
+        // Placing the solve's first piece keeps the same solve, minus it.
+        let session = mode.solve.as_ref().unwrap();
+        let solve = &session.solves[session.index as usize];
+        let (piece, cells) = solve.steps[0];
+        let mut board = snapshot.observation.board;
+        for index in 0..60u32 {
+            if cells & (1 << index) != 0 {
+                board[(index / 10) as usize][(index % 10) as usize] = Some(piece);
+            }
+        }
+        let shown = guide.cells.len();
+        let mut placed = observation(
+            None,
+            Piece::S,
+            [Piece::Z, Piece::I, Piece::T, Piece::L, Piece::J],
+        );
+        placed.board = board;
+        tracker.commit(placed, 0.75, 4);
+        let snapshot = tracker.snapshots().last().unwrap().clone();
+        let guide = mode.guide(&tracker, &snapshot);
+        assert!(guide.status.contains("perfect clear"), "{}", guide.status);
+        assert_eq!(guide.cells.len(), shown - 4, "{}", guide.status);
     }
 }
