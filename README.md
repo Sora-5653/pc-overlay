@@ -311,7 +311,8 @@ setups drawn in colour is buildable in some order of its own pieces; over
 every order, 88.4% of orders build on average and 1489 setups build in every
 order. From each PC's start with random 7-bag queues and a cold cache, the
 search takes 0.1-8 ms on average and 26 ms at worst (5th PC), measured by
-`cargo run --release --example konbini_timing`. Not checked in TETR.IO yet.
+`cargo run --release --example konbini_timing`. Tried in TETR.IO on
+2026-10-21 with no problems reported.
 The solves after the setup and the sheets' cover data are not used.
 
 ## TETR.IO display-scale calibration
