@@ -2,6 +2,7 @@ use std::{
     error::Error,
     fs,
     path::{Path, PathBuf},
+    sync::mpsc,
     thread,
     time::{Duration, Instant},
 };
@@ -10,7 +11,11 @@ use pc_overlay_core::{
     BoardCalibration, CommitOutcome, DiagramSet, FrameSize, OverlayBoard, OverlayCell,
     OverlayCellKind, OverlayState, OverlayWindow, Piece, RecognizerConfig, RuleSet, SessionTracker,
     SolveProgress, StabilityConfig, StabilityFilter, TetrioRecognizer, TrackerConfig, WindowInfo,
-    WindowLocator, piece_code,
+    WindowLocator,
+    finder::{Buildable, Finder},
+    konbini,
+    konbini::{BuildQuery, KonbiniLibrary, KonbiniProgress},
+    piece_code,
 };
 
 #[cfg(windows)]
@@ -26,6 +31,7 @@ struct Args {
     diagrams: PathBuf,
     cases: PathBuf,
     calibration: PathBuf,
+    konbini: PathBuf,
 }
 
 impl Args {
@@ -36,6 +42,7 @@ impl Args {
             diagrams: PathBuf::from("data/ijlo/diagram_cells.json"),
             cases: PathBuf::from("data/cases"),
             calibration: PathBuf::from("data/overlay-calibration.json"),
+            konbini: PathBuf::from("data/konbini"),
             ..Self::default()
         }
     }
@@ -69,9 +76,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut resync_hotkeys = PcResyncHotkeys::default();
     let mut solve_hotkeys = SolveHotkeys::default();
     let mut solve_notice: Option<(&'static str, Instant)> = None;
+    let mut konbini_hotkeys = KonbiniHotkeys::default();
+    let mut konbini_mode = KonbiniMode::new(args.konbini.clone());
     let mut overlay = OverlayWindow::new()?;
     println!(
-        "run-overlay started; Ctrl+Alt+1..7 resynchronizes the PC number; S shows / Ctrl+Alt+S toggles the solve once the setup is complete; press Ctrl+C to stop"
+        "run-overlay started; Ctrl+Alt+1..7 resynchronizes the PC number; S shows / Ctrl+Alt+S toggles the solve once the setup is complete; Ctrl+Alt+K toggles Setup Konbini mode (Ctrl+Alt+N / Ctrl+Alt+B switch setups, Ctrl+Alt+F refetches); press Ctrl+C to stop"
     );
 
     loop {
@@ -83,6 +92,10 @@ fn main() -> Result<(), Box<dyn Error>> {
             stability.reset();
             eprintln!("PC number manually resynchronized to {}", ordinal.get());
         }
+        if let Some(hotkey) = konbini_hotkeys.poll() {
+            konbini_mode.apply(hotkey);
+        }
+        konbini_mode.poll_fetch();
         if let Some(hotkey) = solve_hotkeys.poll() {
             let setup_complete = latest_setup_complete(&library, &tracker, args.reviewed_only);
             if let Some(notice) = apply_solve_hotkey(&mut tracker, hotkey, setup_complete) {
@@ -140,7 +153,13 @@ fn main() -> Result<(), Box<dyn Error>> {
                     args.reviewed_only,
                     args.verbose,
                 );
-                if let Some(notice) = active_notice {
+                if konbini_mode.enabled {
+                    let stable_now = matches!(
+                        stable,
+                        Some(pc_overlay_core::StabilityOutcome::Stable { .. })
+                    );
+                    konbini_mode.decorate(&mut state, &tracker, stable_now);
+                } else if let Some(notice) = active_notice {
                     state.status.push_str(" | ");
                     state.status.push_str(notice);
                 }
@@ -270,6 +289,334 @@ fn apply_solve_hotkey(
             Some("solve shown")
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KonbiniHotkey {
+    /// Ctrl+Alt+K: Setup Konbini mode ON / OFF.
+    Toggle,
+    /// Ctrl+Alt+N: the next candidate setup.
+    Next,
+    /// Ctrl+Alt+B: the previous candidate setup.
+    Previous,
+    /// Ctrl+Alt+F: download the sheets again.
+    Refetch,
+}
+
+/// Ctrl+Alt+K / N / B / F, edge-triggered like the resync keys.
+#[derive(Debug, Default)]
+struct KonbiniHotkeys {
+    was_down: [bool; 4],
+}
+
+impl KonbiniHotkeys {
+    #[cfg(windows)]
+    fn poll(&mut self) -> Option<KonbiniHotkey> {
+        const VK_CONTROL: i32 = 0x11;
+        const VK_MENU: i32 = 0x12;
+        const KEYS: [(i32, KonbiniHotkey); 4] = [
+            (0x4B, KonbiniHotkey::Toggle),
+            (0x4E, KonbiniHotkey::Next),
+            (0x42, KonbiniHotkey::Previous),
+            (0x46, KonbiniHotkey::Refetch),
+        ];
+
+        let modifiers = key_is_down(VK_CONTROL) && key_is_down(VK_MENU);
+        let mut pressed = None;
+        for ((key, hotkey), was_down) in KEYS.iter().zip(&mut self.was_down) {
+            let down = modifiers && key_is_down(*key);
+            if down && !*was_down {
+                pressed = Some(*hotkey);
+            }
+            *was_down = down;
+        }
+        pressed
+    }
+
+    #[cfg(not(windows))]
+    fn poll(&mut self) -> Option<KonbiniHotkey> {
+        None
+    }
+}
+
+/// Setup Konbini mode: replaces the normal guidance with a setup from the
+/// sheet of the tracked PC number. The sheets are read from the cache
+/// folder, and downloaded in the background when it is empty.
+struct KonbiniMode {
+    enabled: bool,
+    dir: PathBuf,
+    library: Option<KonbiniLibrary>,
+    fetching: Option<mpsc::Receiver<Result<KonbiniLibrary, String>>>,
+    error: Option<String>,
+    /// The candidate shown, cycled by Ctrl+Alt+N / B.
+    index: isize,
+    /// The PC the index belongs to: ordinal and start timestamp.
+    pc_key: Option<(u8, u64)>,
+    finder: Finder,
+    /// Candidates of the last searched state, reused until it changes.
+    shortlist: Option<(ShortlistKey, Vec<Shortlisted>)>,
+}
+
+/// What a shortlist depends on: PC number, observation, and PC pieces.
+type ShortlistKey = (u8, pc_overlay_core::Observation, Vec<Piece>);
+
+/// A candidate setup by index into the library.
+#[derive(Debug, Clone)]
+struct Shortlisted {
+    setup: usize,
+    progress: KonbiniProgress,
+    buildable: Buildable,
+}
+
+/// Move-generation cache entries kept before the cache is dropped.
+const FINDER_CACHE_LIMIT: usize = 200_000;
+
+impl KonbiniMode {
+    fn new(dir: PathBuf) -> Self {
+        Self {
+            enabled: false,
+            dir,
+            library: None,
+            fetching: None,
+            error: None,
+            index: 0,
+            pc_key: None,
+            finder: Finder::new(),
+            shortlist: None,
+        }
+    }
+
+    fn apply(&mut self, hotkey: KonbiniHotkey) {
+        match hotkey {
+            KonbiniHotkey::Toggle => {
+                self.enabled = !self.enabled;
+                eprintln!(
+                    "Setup Konbini mode {}",
+                    if self.enabled { "ON" } else { "OFF" }
+                );
+                if self.enabled && self.library.is_none() && self.fetching.is_none() {
+                    match KonbiniLibrary::load_dir(&self.dir) {
+                        Ok(library) => self.library = Some(library),
+                        Err(konbini::KonbiniError::NotFetched(_)) => self.start_fetch(),
+                        Err(error) => self.error = Some(error.to_string()),
+                    }
+                }
+            }
+            KonbiniHotkey::Next => self.index += 1,
+            // Wraps to the last candidate once the count is known.
+            KonbiniHotkey::Previous => self.index -= 1,
+            KonbiniHotkey::Refetch => {
+                if self.fetching.is_none() {
+                    self.start_fetch();
+                }
+            }
+        }
+    }
+
+    fn start_fetch(&mut self) {
+        let (sender, receiver) = mpsc::channel();
+        let dir = self.dir.clone();
+        eprintln!("fetching Setup Konbini into {}", dir.display());
+        thread::spawn(move || {
+            let result = konbini::fetch_all(&dir)
+                .and_then(|()| KonbiniLibrary::load_dir(&dir))
+                .map_err(|error| error.to_string());
+            let _ = sender.send(result);
+        });
+        self.fetching = Some(receiver);
+        self.error = None;
+    }
+
+    fn poll_fetch(&mut self) {
+        let Some(receiver) = &self.fetching else {
+            return;
+        };
+        match receiver.try_recv() {
+            Ok(Ok(library)) => {
+                eprintln!("Setup Konbini: {} setups loaded", library.setups.len());
+                self.library = Some(library);
+                self.fetching = None;
+            }
+            Ok(Err(error)) => {
+                eprintln!("Setup Konbini fetch failed: {error}");
+                self.error = Some(error);
+                self.fetching = None;
+            }
+            Err(mpsc::TryRecvError::Empty) => {}
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.error = Some("fetch thread stopped".to_string());
+                self.fetching = None;
+            }
+        }
+    }
+
+    /// Replaces the status and cells of a stable frame with the Setup
+    /// Konbini view. Other frames keep their status with a mode marker and
+    /// draw nothing, so a stale setup is never shown.
+    fn decorate(&mut self, state: &mut OverlayState, tracker: &SessionTracker, stable_now: bool) {
+        let pc_key = tracker
+            .current_pc_start()
+            .map(|start| (start.pc_ordinal.get(), start.timestamp_ms));
+        if pc_key != self.pc_key {
+            self.pc_key = pc_key;
+            self.index = 0;
+        }
+        state.cells.clear();
+        let message = if self.fetching.is_some() {
+            Some("fetching Setup Konbini...".to_string())
+        } else if let Some(error) = &self.error {
+            Some(error.clone())
+        } else if self.library.is_none() {
+            Some("no data; press Ctrl+Alt+F to fetch".to_string())
+        } else {
+            None
+        };
+        if let Some(message) = message {
+            state.status = format!("PC Overlay [Konbini]: {message}");
+            return;
+        }
+        let (Some(library), Some(snapshot), true) =
+            (&self.library, tracker.snapshots().last(), stable_now)
+        else {
+            state.status = state
+                .status
+                .replacen("PC Overlay", "PC Overlay [Konbini]", 1);
+            return;
+        };
+        let key = (
+            snapshot.pc_ordinal.get(),
+            snapshot.observation.clone(),
+            pc_pieces(tracker, snapshot),
+        );
+        if self
+            .shortlist
+            .as_ref()
+            .is_none_or(|(known, _)| *known != key)
+        {
+            if self.finder.cached_moves() > FINDER_CACHE_LIMIT {
+                self.finder.clear_cache();
+            }
+            let shortlist = konbini_shortlist(library, &mut self.finder, tracker, snapshot);
+            self.shortlist = Some((key, shortlist));
+        }
+        let shortlist = &self.shortlist.as_ref().expect("just computed").1;
+        let (status, cells) = konbini_render(library, snapshot, shortlist, &mut self.index);
+        state.status = status;
+        state.cells = cells;
+    }
+}
+
+/// The PC's pieces from its start: HOLD, then the queue disclosed since.
+fn pc_pieces(
+    tracker: &SessionTracker,
+    snapshot: &pc_overlay_core::tracker::Snapshot,
+) -> Vec<Piece> {
+    tracker
+        .current_pc_start()
+        .and_then(|start| start.observation.hold)
+        .into_iter()
+        .chain(snapshot.observed_queue_history.iter().copied())
+        .collect()
+}
+
+/// The setups of the snapshot's PC that match the board and can be built
+/// from its HOLD and queue.
+fn konbini_shortlist(
+    library: &KonbiniLibrary,
+    finder: &mut Finder,
+    tracker: &SessionTracker,
+    snapshot: &pc_overlay_core::tracker::Snapshot,
+) -> Vec<Shortlisted> {
+    let stage = snapshot.pc_ordinal.get();
+    let pieces = pc_pieces(tracker, snapshot);
+    let query = BuildQuery {
+        pc_pieces: &pieces,
+        observation: &snapshot.observation,
+        // A perfect-clear loop deals 10 pieces per PC.
+        pieces_before_pc: Some(10 * usize::from(stage - 1)),
+    };
+    library
+        .candidates(stage, &query, finder)
+        .into_iter()
+        .map(|candidate| Shortlisted {
+            setup: candidate.setup_index,
+            progress: candidate.progress,
+            buildable: candidate.buildable,
+        })
+        .collect()
+}
+
+#[cfg(test)]
+fn konbini_guidance(
+    library: &KonbiniLibrary,
+    tracker: &SessionTracker,
+    snapshot: &pc_overlay_core::tracker::Snapshot,
+    index: &mut isize,
+) -> (String, Vec<OverlayCell>) {
+    let shortlist = konbini_shortlist(library, &mut Finder::new(), tracker, snapshot);
+    konbini_render(library, snapshot, &shortlist, index)
+}
+
+/// The candidate at `index` (wrapped into range): status line and cells.
+fn konbini_render(
+    library: &KonbiniLibrary,
+    snapshot: &pc_overlay_core::tracker::Snapshot,
+    candidates: &[Shortlisted],
+    index: &mut isize,
+) -> (String, Vec<OverlayCell>) {
+    let stage = snapshot.pc_ordinal.get();
+    let label = konbini::stage_label(stage);
+    if candidates.is_empty() {
+        return (
+            format!(
+                "PC Overlay [Konbini {label}]: no buildable setup matches the board ({} in sheet)",
+                library.stage_count(stage)
+            ),
+            Vec::new(),
+        );
+    }
+    let position = index.rem_euclid(candidates.len() as isize) as usize;
+    *index = position as isize;
+    let candidate = &candidates[position];
+    let setup = &library.setups[candidate.setup];
+    let sol = setup
+        .sol_percent
+        .map(|sol| format!(" {sol:.2}%"))
+        .unwrap_or_default();
+    let source = if setup.source.is_empty() {
+        String::new()
+    } else {
+        format!(" [{}]", setup.source)
+    };
+    let complete = if candidate.progress.complete() {
+        " setup complete"
+    } else if candidate.buildable == Buildable::Sometimes {
+        " depends on next pieces"
+    } else {
+        ""
+    };
+    let status = format!(
+        "PC Overlay [Konbini {label}]: {}{sol}{source} ({}/{}){complete}; Ctrl+Alt+N/B to switch",
+        setup.id,
+        position + 1,
+        candidates.len(),
+    );
+    let current = snapshot.observation.current;
+    let cells = candidate
+        .progress
+        .remaining
+        .iter()
+        .map(|cell| OverlayCell {
+            cell: cell.cell,
+            piece: cell.piece,
+            kind: if cell.piece == Some(current) {
+                OverlayCellKind::Current
+            } else {
+                OverlayCellKind::Missing
+            },
+        })
+        .collect();
+    (status, cells)
 }
 
 #[cfg(windows)]
@@ -689,9 +1036,12 @@ fn parse_args() -> Result<Args, Box<dyn Error>> {
                 args.calibration =
                     PathBuf::from(values.next().ok_or("--calibration requires a path")?);
             }
+            "--konbini" => {
+                args.konbini = PathBuf::from(values.next().ok_or("--konbini requires a folder")?);
+            }
             "--help" | "-h" => {
                 println!(
-                    "run-overlay [--once] [--verbose] [--reviewed-only] [--interval-ms N] [--rules PATH] [--diagrams PATH] [--cases DIR] [--calibration PATH]"
+                    "run-overlay [--once] [--verbose] [--reviewed-only] [--interval-ms N] [--rules PATH] [--diagrams PATH] [--cases DIR] [--calibration PATH] [--konbini DIR]"
                 );
                 std::process::exit(0);
             }
@@ -1093,5 +1443,130 @@ mod tests {
         commit_board(&mut tracker, empty_board(), 4);
         assert_eq!(tracker.pc_ordinal().get(), 3);
         assert!(!tracker.guidance().show_solve);
+    }
+
+    /// Two 2nd-PC setups of the TILJ case, as the sheet's CSV has them.
+    const KONBINI_SECOND: &str = "\"KNEWJADE\",\"ID2\",\"SOL\",\"CASES\",\"FUMEN\"\n\
+        \"\",\"TILJ\",\"98.33%\",\"4956/5040\",\"v115@Ghg0DeglAewwBeg0Deglywh0DehlzhJeAgH\"\n\
+        \"\",\"TILJ\",\"100.00%\",\"5040/5040\",\"v115@GhwhDeglCeg0whDeglywg0whDehlwwh0whJeAgH\"\n";
+
+    fn konbini_library() -> KonbiniLibrary {
+        let mut library = KonbiniLibrary::default();
+        library.add_stage_csv(2, KONBINI_SECOND);
+        library
+    }
+
+    /// PC 1 clears into a 2nd PC that starts with T, I, L, J.
+    fn tilj_pc_two() -> SessionTracker {
+        let mut tracker = SessionTracker::new(TrackerConfig::default());
+        let queue = [Piece::I, Piece::L, Piece::J, Piece::O, Piece::S];
+        let mut filled = observation(None, Piece::T, queue);
+        filled.board[0][0] = Some(Piece::T);
+        tracker.commit(filled, 0.75, 1);
+        tracker.commit(observation(None, Piece::T, queue), 0.75, 2);
+        tracker
+    }
+
+    #[test]
+    fn konbini_shows_the_best_setup_and_cycles_through_candidates() {
+        let library = konbini_library();
+        let tracker = tilj_pc_two();
+        let snapshot = tracker.snapshots().last().unwrap();
+        assert_eq!(
+            pc_pieces(&tracker, snapshot)[..4],
+            [Piece::T, Piece::I, Piece::L, Piece::J]
+        );
+
+        let mut index = 0;
+        let (status, cells) = konbini_guidance(&library, &tracker, snapshot, &mut index);
+        assert!(
+            status.contains("[Konbini 2nd]: TILJ 100.00% [KNEWJADE] (1/2)"),
+            "{status}"
+        );
+        assert_eq!(cells.len(), 16);
+        assert!(
+            cells
+                .iter()
+                .filter(|cell| cell.kind == OverlayCellKind::Current)
+                .all(|cell| cell.piece == Some(Piece::T))
+        );
+
+        // Previous from the first wraps to the last.
+        let mut index = -1;
+        let (status, _) = konbini_guidance(&library, &tracker, snapshot, &mut index);
+        assert!(status.contains("98.33% [KNEWJADE] (2/2)"), "{status}");
+        assert_eq!(index, 1);
+    }
+
+    #[test]
+    fn konbini_drops_setups_the_board_contradicts() {
+        let library = konbini_library();
+        let mut tracker = tilj_pc_two();
+        let mut board = empty_board();
+        board[19][0] = Some(Piece::I);
+        let mut next = observation(
+            None,
+            Piece::I,
+            [Piece::L, Piece::J, Piece::O, Piece::S, Piece::Z],
+        );
+        next.board = board;
+        tracker.commit(next, 0.75, 3);
+        let snapshot = tracker.snapshots().last().unwrap();
+        let (status, cells) = konbini_guidance(&library, &tracker, snapshot, &mut 0);
+        assert!(
+            status.contains("no buildable setup matches the board (2 in sheet)"),
+            "{status}"
+        );
+        assert!(cells.is_empty());
+    }
+
+    #[test]
+    fn konbini_mode_draws_nothing_on_unstable_frames_and_resets_per_pc() {
+        let mut mode = KonbiniMode::new(PathBuf::from("unused"));
+        mode.enabled = true;
+        mode.library = Some(konbini_library());
+        let tracker = tilj_pc_two();
+        let mut state = OverlayState {
+            status: "PC Overlay: waiting for stable frame (1/3)".to_string(),
+            cells: vec![OverlayCell {
+                cell: Cell { x: 0, y: 0 },
+                piece: None,
+                kind: OverlayCellKind::Missing,
+            }],
+            ..OverlayState::default()
+        };
+        mode.decorate(&mut state, &tracker, false);
+        assert_eq!(
+            state.status,
+            "PC Overlay [Konbini]: waiting for stable frame (1/3)"
+        );
+        assert!(state.cells.is_empty());
+
+        mode.apply(KonbiniHotkey::Next);
+        mode.decorate(&mut state, &tracker, true);
+        assert!(state.status.contains("(2/2)"), "{}", state.status);
+        assert_eq!(state.cells.len(), 16);
+
+        // A new PC starts again from the best setup.
+        let mut tracker = tracker;
+        let mut filled = observation(
+            None,
+            Piece::T,
+            [Piece::I, Piece::L, Piece::J, Piece::O, Piece::S],
+        );
+        filled.board[0][0] = Some(Piece::T);
+        tracker.commit(filled, 0.75, 3);
+        tracker.resync(pc_overlay_core::PcOrdinal::new(2).unwrap());
+        tracker.commit(
+            observation(
+                None,
+                Piece::T,
+                [Piece::I, Piece::L, Piece::J, Piece::O, Piece::S],
+            ),
+            0.75,
+            4,
+        );
+        mode.decorate(&mut state, &tracker, true);
+        assert!(state.status.contains("(1/2)"), "{}", state.status);
     }
 }

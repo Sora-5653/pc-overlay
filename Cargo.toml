@@ -51,5 +51,9 @@ name = "configure-overlay"
 path = "src/bin/configure_overlay.rs"
 
 [[bin]]
+name = "fetch-konbini"
+path = "src/bin/fetch_konbini.rs"
+
+[[bin]]
 name = "probe-recognition"
 path = "src/bin/probe_recognition.rs"
