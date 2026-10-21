@@ -8,7 +8,9 @@ pub mod calibration;
 pub mod capture;
 pub mod condition;
 pub mod diagram;
+pub mod fumen;
 pub mod guidance;
+pub mod konbini;
 pub mod model;
 pub mod overlay;
 pub mod recognition;
@@ -23,10 +25,12 @@ pub use condition::{
     Condition, EvalContext, EvalResult, Prerequisite, QueuePattern, SolvableSolve,
 };
 pub use diagram::{Diagram, DiagramPlacement, DiagramSet, DiagramValidationReport};
+pub use fumen::{FumenCell, FumenError, decode_first_page};
 pub use guidance::{
     ExpectedCell, ExpectedCellStatus, OverlayPlan, SetupProgress, SolveProgress,
     evaluate_setup_progress, evaluate_solve_progress,
 };
+pub use konbini::{KonbiniCandidate, KonbiniError, KonbiniLibrary, KonbiniSetup};
 pub use model::{
     Board, Cell, Observation, PcOrdinal, Piece, Placement, board_is_empty, empty_board,
 };
