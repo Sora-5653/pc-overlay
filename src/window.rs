@@ -80,6 +80,15 @@ pub fn is_tetrio_title(title: &str) -> bool {
     title.to_ascii_lowercase().contains("tetr.io")
 }
 
+/// Whether a process image is TETR.IO Desktop (`TETR.IO.exe`). The title
+/// alone also matches a browser showing tetr.io or any page titled with it,
+/// and the largest such window would win over the game.
+pub fn is_tetrio_desktop_image(path: &str) -> bool {
+    path.rsplit(['\\', '/'])
+        .next()
+        .is_some_and(|name| name.eq_ignore_ascii_case("TETR.IO.exe"))
+}
+
 #[cfg(windows)]
 fn enumerate_visible_windows() -> Result<Vec<WindowInfo>, WindowLocatorError> {
     use windows_sys::{
@@ -132,6 +141,9 @@ fn enumerate_visible_windows() -> Result<Vec<WindowInfo>, WindowLocatorError> {
 
             let mut process_id = 0u32;
             GetWindowThreadProcessId(hwnd, &mut process_id);
+            if !process_image(process_id).is_some_and(|path| is_tetrio_desktop_image(&path)) {
+                return 1;
+            }
             let candidates = &mut *(lparam as *mut Vec<WindowInfo>);
             candidates.push(WindowInfo {
                 handle: hwnd as usize as u64,
@@ -145,6 +157,33 @@ fn enumerate_visible_windows() -> Result<Vec<WindowInfo>, WindowLocatorError> {
                 },
             });
             1
+        }
+    }
+
+    /// The full path of a process's executable, readable without elevation.
+    fn process_image(process_id: u32) -> Option<String> {
+        use windows_sys::Win32::{
+            Foundation::CloseHandle,
+            System::Threading::{
+                OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+                QueryFullProcessImageNameW,
+            },
+        };
+        unsafe {
+            let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, process_id);
+            if process.is_null() {
+                return None;
+            }
+            let mut buffer = [0u16; 1024];
+            let mut length = buffer.len() as u32;
+            let ok = QueryFullProcessImageNameW(
+                process,
+                PROCESS_NAME_WIN32,
+                buffer.as_mut_ptr(),
+                &mut length,
+            );
+            CloseHandle(process);
+            (ok != 0).then(|| String::from_utf16_lossy(&buffer[..length as usize]))
         }
     }
 
@@ -171,6 +210,18 @@ mod tests {
         assert!(is_tetrio_title("TETR.IO"));
         assert!(is_tetrio_title("TETR.IO Desktop - ZEN"));
         assert!(!is_tetrio_title("Tetris Effect"));
+    }
+
+    #[test]
+    fn only_the_desktop_client_process_counts_not_a_browser() {
+        assert!(is_tetrio_desktop_image(
+            r"C:\Users\me\AppData\Local\Programs\tetrio-desktop\TETR.IO.exe"
+        ));
+        assert!(is_tetrio_desktop_image("tetr.io.EXE"));
+        assert!(!is_tetrio_desktop_image(
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+        ));
+        assert!(!is_tetrio_desktop_image(r"C:\tools\TETR.IO.exe.bak"));
     }
 
     #[test]

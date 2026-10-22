@@ -40,9 +40,14 @@ This directory now contains the first implementation slice for the specification
   the session tracker can consume it. The three-frame agreement is the primary
   animation/noise guard; the previous 92% threshold rejected normal antialiased
   TETR.IO previews.
-- Windows-only visible-window discovery that filters for `TETR.IO` titles,
-  records the client rectangle and process identity, and chooses the largest
-  qualifying candidate. It does not inspect TETR.IO internals or monitor input.
+- Windows-only visible-window discovery that filters for `TETR.IO` titles
+  owned by the TETR.IO Desktop process (`TETR.IO.exe`), records the client
+  rectangle and process identity, and chooses the largest qualifying
+  candidate. It does not inspect TETR.IO internals or monitor input. Until
+  2026-10-22 the title alone decided, so a browser whose page title
+  contains "TETR.IO" (tetr.io itself, or this repository on GitHub) was
+  captured instead when the game was minimized or smaller; tetr.io in a
+  browser is not supported.
 - A Windows GDI client-area frame source returning validated top-to-bottom RGBA
   frames. `probe-capture --bmp <path>` is an opt-in calibration diagnostic; the
   normal frame path does not write screenshots.
