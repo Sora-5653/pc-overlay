@@ -489,6 +489,78 @@ selects another file. `probe-recognition --bmp PATH` is an offline diagnostic;
 it prints the resolved board rectangle and each Current/HOLD/NEXT result
 without changing any session state.
 
+## TETR.IO engine and seeds
+
+`src/engine.rs` is a solo TETR.IO v19 engine, ported from the solo half of
+`ReplayMachine` in czsmall_nnue's `trainer/ttrm_exact_replay.py`. It is the
+first step toward an app that runs the game itself instead of reading
+TETR.IO's screen. It covers the MINSTD 7-bag stream, SRS+ with 180-degree
+kicks, DAS/ARR/DCD/SDF handling (including DAS cancel and safelock),
+gravity and its ramp, lock delay with movement and rotation resets, Hold,
+clutch spawning, and `all-mini+` spin detection. The float arithmetic follows
+the Python expression order, including `round(..., 6)` and Python's float
+modulo, because the fall probe depends on the last digits of the piece's Y.
+Multiplayer garbage (packets, cancellation, hole RNG) is not ported;
+`Engine::schedule_garbage` tanks given rows after a placement instead.
+
+`src/ttrm.rs` replays `.ttrm` / `.ttr` event streams on the engine and
+compares the result with the replay's `end` snapshot (board, garbage cells,
+HOLD, pieces placed, lines). A solo `.ttr` has neither a `full` snapshot
+nor an end board: the game starts from `replay.options` on an empty board,
+and the result is checked against `replay.results.stats` (pieces placed,
+lines, holds, and clears by kind, including T-spins). Options the engine
+does not implement (another kick set or bag type, other spin rules, a
+different board size, `allow180 = false`) are rejected rather than
+approximated. `no_szo` is accepted only when the seed's first piece is not
+S, Z, or O, because how the client rearranges that bag is not confirmed.
+
+```powershell
+# End snapshots only (streams that received garbage cannot match).
+cargo run --release --bin verify-ttrm -- <file-or-dir>...
+# Placement-by-placement comparison with the Python reconstruction.
+python -I tools/ttrm_python_dump.py --reconstructor <czsmall_nnue>/trainer <file-or-dir> -o dump.json
+cargo run --release --bin verify-ttrm -- --reference dump.json <file-or-dir>
+```
+
+On 2026-10-21, the 30 local TETRA LEAGUE `.ttrm` files (564 player
+streams) all matched their end snapshots, and all 68,686 placements matched
+the Python reconstruction exactly (piece, rotation, X, Y bit for bit, time,
+HOLD, lines, board). Without the reference, only the 16 streams that
+received no garbage reach the end snapshot. The replay takes about 1.3 s,
+against about 50 s for the Python reconstruction. A 40-line sprint `.ttr`
+recorded the same day (102 pieces, 36 holds, 7 quads, one T-spin double,
+14 pieces placed at 180 degrees, `cancel` and `safelock` on) matched its
+final stats and all 102 placements of the Python reconstruction.
+`tools/ttrm_python_dump.py` gives such a `.ttr` the same synthesized
+`full` snapshot.
+
+`tests/engine_differential.rs` runs the same comparison on synthetic solo
+streams in `tests/fixtures/engine_differential.json` (20 streams, five
+handling and gravity settings including 20G, finite SDF, DAS cancel, and
+no gravity). Real `.ttrm` files are not committed because they contain other
+players' data. Regenerate the fixture with
+`python -I tools/make_engine_fixture.py --reconstructor <czsmall_nnue>/trainer`.
+
+Not covered yet:
+
+- Swapping the later 180-degree kicks for 0 to 2 (entries 2 and 3) is not
+  detected by the corpus or the synthetic streams. The table was reviewed
+  against the implementation and accepted on 2026-10-21, but those entries
+  are not confirmed by replay data.
+- Only one solo `.ttr` (40 lines) has been replayed.
+- Only `all-mini+` spins, the 7-bag, and 10x40 boards are supported.
+- There is no real-time loop, input, or rendering yet.
+
+Seeds: a replay's seed is its `options.seed`.
+`recover-seed --replay <file>` prints each stream's seed and first three
+bags. During live play the seed is hidden, but MINSTD has only 2^31 - 2
+states, so `recover-seed <pieces>` (spawn order, Current then NEXT, without
+Hold, e.g. `OSITJLZ OIJLTZS OSJTZIL`) searches all of them in about 1.3 s
+on all CPU cores and previews the following pieces. On a corpus game, 7 pieces
+leave 426,082 seeds (about 2^31 / 7!), 14 leave 94, and 21 (three bags) leave only the
+true seed. TETR.IO's custom rooms can also fix the seed, which makes the
+whole queue known before the game starts.
+
 ## Next implementation slice
 
 1. Done (2026-10-18): the IJLO cell grid matches the source raster for all
