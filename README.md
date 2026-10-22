@@ -76,7 +76,12 @@ This directory now contains the first implementation slice for the specification
   complete it draws the remaining cells of a verified solve once the player
   presses `S` or `Ctrl+Alt+S` (OFF at the start of every PC). Unknown states
   never reuse a stale
-  recommendation.
+  recommendation. Since 2026-10-22 setup and solve cells are a light,
+  translucent tint in the piece colour with an outline around each piece
+  (not around every cell); the cells of the current piece are tinted more
+  strongly, and warnings are red. The window uses per-pixel alpha
+  (`UpdateLayeredWindow`), so the falling piece stays visible through the
+  tint. Touching pieces of the same type share one outline.
 
 ## IJLO transcription status
 
