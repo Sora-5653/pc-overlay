@@ -40,6 +40,8 @@ pub enum ReplayError {
     },
     #[error("input subframe moved backwards at frame {frame}")]
     Backwards { frame: i64 },
+    #[error("event time at frame {frame} is outside the {MAX_FRAME}-frame limit")]
+    FrameOutOfRange { frame: i64 },
     #[error("unsupported game option: {0}")]
     Unsupported(String),
     #[error("engine: {0}")]
@@ -201,8 +203,12 @@ pub fn parse_board(rows: &[Value]) -> Result<EngineBoard, ReplayError> {
                 Value::String(s) if s.is_empty() => BoardCell::Empty,
                 Value::String(s) => match s.to_ascii_uppercase().as_str() {
                     "GB" | "G" | "GARBAGE" => BoardCell::Garbage,
+                    // `get` rather than `[..1]`: a non-ASCII first letter
+                    // is an unknown cell, not a panic.
                     other => BoardCell::Piece(
-                        piece_from_letter(&other[..1])
+                        other
+                            .get(..1)
+                            .and_then(piece_from_letter)
                             .ok_or_else(|| ReplayError::UnknownCell(s.clone()))?,
                     ),
                 },
@@ -381,6 +387,24 @@ pub struct StreamRun {
     pub garbage: BTreeMap<usize, Vec<u8>>,
 }
 
+/// The latest frame a replay may reach: 24 hours at 60 frames a second.
+/// The engine steps frame by frame, so an unbounded frame number from the
+/// file would never finish. Real games are minutes long.
+pub const MAX_FRAME: i64 = 24 * 60 * 60 * 60;
+
+/// An event's time in subframe ticks (10 per frame), within [`MAX_FRAME`].
+fn event_time(frame: i64, subframe: Option<&Value>) -> Result<i64, ReplayError> {
+    let ticks = subframe.map_or(0, |sub| {
+        (number(Some(sub), 0.0) * 10.0).round_ties_even() as i64
+    });
+    (0..=MAX_FRAME)
+        .contains(&frame)
+        .then(|| (frame * 10).checked_add(ticks))
+        .flatten()
+        .filter(|at| (0..=(MAX_FRAME + 1) * 10).contains(at))
+        .ok_or(ReplayError::FrameOutOfRange { frame })
+}
+
 const SKIPPED: [&str; 7] = [
     "start",
     "full",
@@ -413,13 +437,13 @@ pub fn run_stream(stream: &StreamRef<'_>, run: &StreamRun) -> Result<StreamResul
         // frame has already reached, so it never moves time backwards.
         let at = match data.and_then(|d| d.get("subframe")) {
             Some(sub) => {
-                let at = frame * 10 + (number(Some(sub), 0.0) * 10.0).round_ties_even() as i64;
+                let at = event_time(frame, Some(sub))?;
                 if at < engine.time() {
                     return Err(ReplayError::Backwards { frame });
                 }
                 at
             }
-            None => (frame * 10).max(engine.time()),
+            None => event_time(frame, None)?.max(engine.time()),
         };
         engine.advance_to(at)?;
         last_gameplay = Some(event);
@@ -447,7 +471,7 @@ pub fn run_stream(stream: &StreamRef<'_>, run: &StreamRun) -> Result<StreamResul
 
     // The end frame's normal frame-tail physics has completed in the snapshot.
     let end_frame = integer(end.get("frame"), 0);
-    let end_tail = (end_frame + 1) * 10;
+    let end_tail = event_time(end_frame, None)? + 10;
     if end_tail >= engine.time() {
         engine.advance_to(end_tail)?;
     }
