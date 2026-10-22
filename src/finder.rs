@@ -435,6 +435,8 @@ pub enum Buildable {
 #[derive(Debug, Default)]
 pub struct Finder {
     moves: HashMap<(Mask, Piece), Rc<[Mask]>>,
+    /// Drawn placements per number of drawing rows.
+    drawn: HashMap<usize, Rc<DrawnTable>>,
 }
 
 /// Failed states of one target: placed cells, HOLD, and the rest of the
@@ -606,6 +608,358 @@ impl Finder {
         failed.insert(key);
         false
     }
+}
+
+/// One piece of a solution: the piece and the drawing cells it covers.
+pub type Step = (Piece, Mask);
+
+/// The order pieces can be played in.
+#[derive(Debug, Clone, Copy)]
+pub enum Supply<'a> {
+    /// The live queue (Current first) with one HOLD slot.
+    Queue {
+        hold: Option<Piece>,
+        queue: &'a [Piece],
+    },
+    /// These pieces (counts in `ALL_PIECES` order) in any order: whether a
+    /// set of placements can be stacked at all, as the source solves were
+    /// checked.
+    AnyOrder([u8; 7]),
+}
+
+/// Where a solution search stands in its supply: HOLD and the next queue
+/// index, or the pieces left.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum SupplyState {
+    Queue { hold: Option<Piece>, next: usize },
+    AnyOrder([u8; 7]),
+}
+
+/// A placement in drawing coordinates: the piece, its cells, and the rows
+/// (bit per row) it is split around, which must clear before it is placed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DrawnPiece {
+    piece: Piece,
+    cells: Mask,
+    gaps: u8,
+}
+
+/// Every drawn placement within the drawing rows `0..rows`, indexed by its
+/// lowest cell (`Mask::trailing_zeros`). A piece placed after rows cleared
+/// is drawn split around them: a shape `k` rows tall takes any `k` of the
+/// rows, as in solution-finder's line-clear-aware placements.
+#[derive(Debug)]
+struct DrawnTable {
+    by_lowest: Vec<Vec<DrawnPiece>>,
+}
+
+impl DrawnTable {
+    fn new(rows: usize) -> Self {
+        let shapes = shapes();
+        let mut by_lowest = vec![Vec::new(); FIELD_ROWS * 10];
+        let mut seen = HashSet::new();
+        for piece in ALL_PIECES {
+            let index = piece_index(piece);
+            for shape in shapes.cells[index].iter().take(shapes.rotations[index]) {
+                let low = shape.iter().map(|(_, dy)| *dy).min().unwrap();
+                let left = shape.iter().map(|(dx, _)| *dx).min().unwrap();
+                let height = (shape.iter().map(|(_, dy)| *dy).max().unwrap() - low + 1) as usize;
+                let width = shape.iter().map(|(dx, _)| *dx).max().unwrap() - left + 1;
+                // Each increasing choice of `height` rows out of `0..rows`.
+                for choice in 0u32..1 << rows {
+                    if choice.count_ones() as usize != height {
+                        continue;
+                    }
+                    let chosen: Vec<u8> =
+                        (0..rows as u8).filter(|y| choice & (1 << y) != 0).collect();
+                    let first = chosen[0];
+                    let last = chosen[height - 1];
+                    let gaps = (first..=last)
+                        .filter(|y| choice & (1 << y) == 0)
+                        .fold(0u8, |gaps, y| gaps | 1 << y);
+                    for x in 0..=(WIDTH - width) {
+                        let cells = shape.iter().fold(0, |cells, (dx, dy)| {
+                            cells | bit((x + dx - left) as u8, chosen[(dy - low) as usize])
+                        });
+                        if seen.insert((piece, cells)) {
+                            by_lowest[cells.trailing_zeros() as usize].push(DrawnPiece {
+                                piece,
+                                cells,
+                                gaps,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        Self { by_lowest }
+    }
+}
+
+impl Target {
+    /// The rows `0..height` of the drawing filled completely, any piece in
+    /// any cell: a perfect clear of that height.
+    pub fn perfect_clear(height: usize) -> Option<Self> {
+        (height <= FIELD_ROWS).then(|| {
+            let cells = (0..height).map(row_mask).fold(0, |a, b| a | b);
+            Self {
+                cells,
+                coloured: [0; 7],
+                any: cells,
+            }
+        })
+    }
+
+    /// Rows of `placed` that have cleared, a bit per row.
+    fn cleared_bits(&self, placed: Mask) -> u8 {
+        self.cleared(placed)
+            .iter()
+            .fold(0, |bits, row| bits | 1 << row)
+    }
+
+    /// Maps drawing cells in rows that have not cleared to the live field.
+    fn to_field(&self, placed: Mask, drawing: Mask) -> Mask {
+        let cleared = self.cleared_bits(placed);
+        let mut field = 0;
+        let mut field_row = 0;
+        for y in 0..FIELD_ROWS {
+            if cleared & (1 << y) != 0 {
+                continue;
+            }
+            field |= ((drawing >> (y * 10)) & ROW) << (field_row * 10);
+            field_row += 1;
+        }
+        field
+    }
+}
+
+impl Finder {
+    fn drawn_table(&mut self, rows: usize) -> Rc<DrawnTable> {
+        self.drawn
+            .entry(rows)
+            .or_insert_with(|| Rc::new(DrawnTable::new(rows)))
+            .clone()
+    }
+
+    /// Every way to finish `target` from `placed` drawing cells with the
+    /// pieces `supply` gives, as sets of steps (the order is not part of a
+    /// solution); at most `limit`. As in solution-finder, the empty cells
+    /// are first tiled with the pieces available, ignoring order (each step
+    /// covers the lowest empty cell), and each tiling is kept when some
+    /// order of it can be played: every piece comes from the supply, lands
+    /// with SRS+ movement on the field of the moment, and is placed only
+    /// after the rows it is drawn split around have cleared.
+    pub fn solutions(
+        &mut self,
+        target: &Target,
+        placed: Mask,
+        supply: Supply<'_>,
+        limit: usize,
+    ) -> Vec<Vec<Step>> {
+        let (queue, state, counts) = match supply {
+            Supply::Queue { hold, queue } => {
+                let mut counts = [0u8; 7];
+                for piece in hold.iter().chain(queue) {
+                    counts[piece_index(*piece)] += 1;
+                }
+                (queue, SupplyState::Queue { hold, next: 0 }, counts)
+            }
+            Supply::AnyOrder(counts) => (&[][..], SupplyState::AnyOrder(counts), counts),
+        };
+        let rows = (0..FIELD_ROWS)
+            .rev()
+            .find(|y| target.cells & row_mask(*y) != 0)
+            .map_or(0, |y| y + 1);
+        let table = self.drawn_table(rows);
+        let mut search = Solutions {
+            target,
+            placed,
+            queue,
+            start: state,
+            table: &table,
+            tiling: Vec::new(),
+            found: Vec::new(),
+            limit,
+        };
+        search.tile(self, target.cells & !placed, counts);
+        search.found
+    }
+
+    /// Perfect clears from a live field (no rows cleared yet): the lowest
+    /// height from the top block up to 4 rows whose empty cells the supply
+    /// can fill, with its solutions. `None` when no height works.
+    pub fn perfect_clears(
+        &mut self,
+        field: Mask,
+        supply: Supply<'_>,
+        limit: usize,
+    ) -> Option<(usize, Vec<Vec<Step>>)> {
+        let top = (0..FIELD_ROWS)
+            .rev()
+            .find(|y| field & row_mask(*y) != 0)
+            .map_or(0, |y| y + 1);
+        let pieces = match supply {
+            Supply::Queue { hold, queue } => queue.len() + usize::from(hold.is_some()),
+            Supply::AnyOrder(counts) => counts.iter().map(|count| usize::from(*count)).sum(),
+        };
+        for height in top.max(1)..=4 {
+            let empty = height * 10 - field.count_ones() as usize;
+            if !empty.is_multiple_of(4) || empty / 4 > pieces {
+                continue;
+            }
+            let target = Target::perfect_clear(height).expect("4 rows fit the field");
+            let found = self.solutions(&target, field, supply, limit);
+            if !found.is_empty() {
+                return Some((height, found));
+            }
+        }
+        None
+    }
+}
+
+/// One run of `Finder::solutions`.
+struct Solutions<'a> {
+    target: &'a Target,
+    placed: Mask,
+    queue: &'a [Piece],
+    start: SupplyState,
+    table: &'a DrawnTable,
+    /// The tiling being built.
+    tiling: Vec<DrawnPiece>,
+    found: Vec<Vec<Step>>,
+    limit: usize,
+}
+
+impl Solutions<'_> {
+    /// Tiles `empty` with the pieces in `counts`, each step covering the
+    /// lowest empty cell, and keeps the tilings that can be played.
+    fn tile(&mut self, finder: &mut Finder, empty: Mask, counts: [u8; 7]) {
+        if self.found.len() >= self.limit {
+            return;
+        }
+        if empty == 0 {
+            let mut failed = HashSet::new();
+            if self.playable(finder, self.placed, self.start, 0, &mut failed) {
+                let mut steps: Vec<Step> = self
+                    .tiling
+                    .iter()
+                    .map(|drawn| (drawn.piece, drawn.cells))
+                    .collect();
+                steps.sort_unstable();
+                self.found.push(steps);
+            }
+            return;
+        }
+        let table = self.table;
+        for drawn in &table.by_lowest[empty.trailing_zeros() as usize] {
+            let index = piece_index(drawn.piece);
+            if counts[index] == 0
+                || drawn.cells & !empty != 0
+                || drawn.cells & !self.target.allowed(drawn.piece) != 0
+            {
+                continue;
+            }
+            let mut left = counts;
+            left[index] -= 1;
+            self.tiling.push(*drawn);
+            self.tile(finder, empty & !drawn.cells, left);
+            self.tiling.pop();
+        }
+    }
+
+    /// Whether the tiling's unplaced steps (`used` has a bit per placed
+    /// step) can be played from `placed` in some order the supply allows.
+    fn playable(
+        &self,
+        finder: &mut Finder,
+        placed: Mask,
+        state: SupplyState,
+        used: u16,
+        failed: &mut HashSet<(u16, SupplyState)>,
+    ) -> bool {
+        if usize::from(used) == (1 << self.tiling.len()) - 1 {
+            return true;
+        }
+        if failed.contains(&(used, state)) {
+            return false;
+        }
+        let cleared = self.target.cleared_bits(placed);
+        let field = self.target.field(placed);
+        for (piece, after) in supply_options(self.queue, state) {
+            let moves = finder.moves(field, piece);
+            for (step, drawn) in self.tiling.iter().enumerate() {
+                if used & (1 << step) != 0 || drawn.piece != piece || drawn.gaps & !cleared != 0 {
+                    continue;
+                }
+                let live = self.target.to_field(placed, drawn.cells);
+                if moves.binary_search(&live).is_ok()
+                    && self.playable(
+                        finder,
+                        placed | drawn.cells,
+                        after,
+                        used | 1 << step,
+                        failed,
+                    )
+                {
+                    return true;
+                }
+            }
+        }
+        failed.insert((used, state));
+        false
+    }
+}
+
+/// The pieces the supply can play next, with its state afterwards.
+fn supply_options(queue: &[Piece], state: SupplyState) -> Vec<(Piece, SupplyState)> {
+    let mut options = Vec::new();
+    match state {
+        SupplyState::Queue { hold, next } => {
+            if let Some(&current) = queue.get(next) {
+                options.push((
+                    current,
+                    SupplyState::Queue {
+                        hold,
+                        next: next + 1,
+                    },
+                ));
+                match hold {
+                    Some(held) if held != current => options.push((
+                        held,
+                        SupplyState::Queue {
+                            hold: Some(current),
+                            next: next + 1,
+                        },
+                    )),
+                    Some(_) => {}
+                    None => {
+                        if let Some(&after) = queue.get(next + 1) {
+                            options.push((
+                                after,
+                                SupplyState::Queue {
+                                    hold: Some(current),
+                                    next: next + 2,
+                                },
+                            ));
+                        }
+                    }
+                }
+            } else if let Some(held) = hold {
+                // The queue is used up; HOLD can still be played.
+                options.push((held, SupplyState::Queue { hold: None, next }));
+            }
+        }
+        SupplyState::AnyOrder(counts) => {
+            for (index, piece) in ALL_PIECES.iter().enumerate() {
+                if counts[index] > 0 {
+                    let mut left = counts;
+                    left[index] -= 1;
+                    options.push((*piece, SupplyState::AnyOrder(left)));
+                }
+            }
+        }
+    }
+    options
 }
 
 /// The pieces each undisclosed position may hold under the 7-bag, given the
@@ -800,6 +1154,65 @@ mod tests {
                     .fold(0, |acc, (x, y, _)| acc | bit(*x, *y))
             ),
             vec![(0, 0), (1, 0), (0, 1), (1, 1)]
+        );
+    }
+
+    #[test]
+    fn perfect_clears_follow_the_queue_and_hold() {
+        // Two rows full except a 4x2 hole at the left: two O side by side
+        // with the queue O, O.
+        let mut field = 0;
+        for y in 0..2u8 {
+            for x in 4..10u8 {
+                field |= bit(x, y);
+            }
+        }
+        let mut finder = Finder::new();
+        let queue = [Piece::O, Piece::O];
+        let (height, found) = finder
+            .perfect_clears(
+                field,
+                Supply::Queue {
+                    hold: None,
+                    queue: &queue,
+                },
+                10,
+            )
+            .unwrap();
+        assert_eq!(height, 2);
+        assert_eq!(found.len(), 1);
+        // I, I fills it as two flat rows; HOLD lets T wait.
+        let queue = [Piece::T, Piece::I, Piece::I];
+        let (_, found) = finder
+            .perfect_clears(
+                field,
+                Supply::Queue {
+                    hold: None,
+                    queue: &queue,
+                },
+                10,
+            )
+            .unwrap();
+        assert_eq!(
+            found,
+            vec![vec![
+                (Piece::I, mask(&[(0, 0), (1, 0), (2, 0), (3, 0)])),
+                (Piece::I, mask(&[(0, 1), (1, 1), (2, 1), (3, 1)])),
+            ]]
+        );
+        // Without the second I there is none.
+        let queue = [Piece::T, Piece::I, Piece::O];
+        assert!(
+            finder
+                .perfect_clears(
+                    field,
+                    Supply::Queue {
+                        hold: None,
+                        queue: &queue
+                    },
+                    10
+                )
+                .is_none()
         );
     }
 

@@ -247,19 +247,47 @@ solve, and placed solve pieces drop out as rows clear. A PC boundary or a
 restores the setting that state had. The detail line ends with `solve ON` or
 `solve OFF`.
 
-## Setup Konbini mode
+## Unified guidance (source rules + Setup Konbini)
 
-A second display mode shows setups for every PC (1st to 7th) from the public
+Since 2026-10-21 `run-overlay` shows one guidance without a mode switch
+(the former `Ctrl+Alt+K` Setup Konbini mode is merged into it):
+
+- 2nd PC: the source rules above (`data/ijlo.json`, `data/cases/*.json`)
+  come first. When they have no data for the case, or select no setup for
+  the board and queue, the 2nd-PC Setup Konbini setups the live queue can
+  build are shown instead, and the detail line says why
+  (`guide=Konbini (source: ...)`).
+- Every other PC: the Setup Konbini setups for that PC number.
+- The status line names the origin: `PC Overlay [source]: ...` or
+  `PC Overlay [Konbini 2nd]: ...`; the detail line ends with
+  `guide=source` / `guide=Konbini`.
+
+Hotkeys (changes from the two-mode version in bold):
+
+| Key | Action |
+|---|---|
+| `S` / `Ctrl+Alt+S` | show / toggle the solve once the setup is complete (as before) |
+| `Ctrl+Alt+1..7` | resynchronize the PC number (as before) |
+| `Ctrl+Alt+N` / `Ctrl+Alt+B` | next / previous Setup Konbini candidate; **now always active**, back to the best candidate when a new PC starts |
+| **`Ctrl+Alt+K`** | **was: Setup Konbini mode ON/OFF. Now: the 2nd PC uses Setup Konbini even when source rules apply (press again to go back)** |
+| `Ctrl+Alt+F` | download the sheets again (as before) |
+
+The sheets are read from `data/konbini/` at startup, and **downloaded in the
+background at startup when that folder is empty** (previously on the first
+`Ctrl+Alt+K`); the status line shows `fetching Setup Konbini...` meanwhile.
+A completed Konbini setup gets solves from the perfect-clear search (see
+"Perfect-clear solve search").
+
+Tests: `cargo test --bin run-overlay` covers source-first on the 2nd PC,
+the `Ctrl+Alt+K` override, fallback with the reason in the note, other PCs,
+completed source setups enabling `S`, and the missing-data message.
+Not tried in TETR.IO yet.
+
+### Setup Konbini data and build search
+
+Setups for every PC (1st to 7th) come from the public
 [Setup Konbini](https://docs.google.com/spreadsheets/d/1tI9fPeeEEEhWS2h0Gzib5UIjLKN33wd18WQSKRjxYMw/edit)
-spreadsheet instead of the 2nd-PC guidance above. It shows only setups the
-live HOLD and queue can build; it does not search for solves.
-
-- `Ctrl+Alt+K` turns the mode ON / OFF. The first time, the sheets are read
-  from `data/konbini/`, or downloaded in the background when that folder is
-  empty (the status line shows `fetching Setup Konbini...`).
-- `Ctrl+Alt+N` / `Ctrl+Alt+B` show the next / previous candidate. The choice
-  goes back to the best candidate when a new PC starts.
-- `Ctrl+Alt+F` downloads the sheets again.
+spreadsheet. Only setups the live HOLD and queue can build are shown.
 
 `cargo run --bin fetch-konbini` downloads the same files from the console.
 Each `Nth: Data` sheet is fetched as CSV with the system `curl`
@@ -314,6 +342,117 @@ search takes 0.1-8 ms on average and 26 ms at worst (5th PC), measured by
 `cargo run --release --example konbini_timing`. Tried in TETR.IO on
 2026-10-21 with no problems reported.
 The solves after the setup and the sheets' cover data are not used.
+
+## Perfect-clear solve search (SRS+)
+
+The user's decision (2026-10-21) was to use knewjade's solution-finder with
+SRS+. It is integrated as a Rust reimplementation of its perfect-clear
+search inside `src/finder.rs`, not by calling the Java `sfinder.jar`:
+
+| | Rust in `finder.rs` (chosen) | `sfinder.jar` as a process |
+|---|---|---|
+| Speed | 3.6 ms mean, 31 ms max per live search (below) | JVM start alone is hundreds of ms per call; a resident process would need a protocol |
+| Distribution | nothing extra; the overlay stays one `.exe` | needs a Java runtime and the jar next to the overlay |
+| SRS+ | the same TETR.IO table the setup search already uses (triangle.js), 180-degree turns included | sfinder ships no SRS+ table; a kicks file would have to duplicate this table and could drift from it |
+
+The search follows solution-finder's two layers for a perfect clear:
+
+1. Tile the empty cells of the 4-line (or lower) field with the pieces
+   available, ignoring order: each step covers the lowest empty cell. A
+   piece placed after a row clears is drawn split around that row, so
+   each shape `k` rows tall may take any `k` of the drawing rows
+   (solution-finder's line-clear-aware placements).
+2. Keep a tiling when some order of it can be played: every piece comes
+   from the queue with one HOLD slot (HOLD may be played after the queue
+   ends), lands with SRS+ movement on the field of the moment (the move
+   generator above, cached per field and piece), and is placed only after
+   the rows it is drawn split around have cleared.
+
+`Finder::perfect_clears` tries the lowest height from the top block up to
+4 rows whose empty cells the pieces can fill; `konbini::find_perfect_clears`
+runs it on the live board with HOLD, Current, and NEXT5 (pieces beyond
+NEXT are not guessed, so a solve needing them is not found). A first
+version that searched piece orders directly (DFS over every placement)
+took about 1 s per 7-piece search, as ~100,000 fields needed move
+generation; tiling first cut that to milliseconds.
+
+In `run-overlay`, once the shown Setup Konbini setup is complete (or the
+board matches no setup, e.g. the player went their own way), the solves
+are searched once for that state (at most 100) and
+
+- the status reads `N perfect clear(s) found (4 lines); press S to show the solve`;
+- `S` / `Ctrl+Alt+S` show / toggle it as before; the solve's remaining cells
+  are drawn like setup cells (Current's piece highlighted);
+- `Ctrl+Alt+N` / `Ctrl+Alt+B` switch between the solves while any exist
+  (between setups otherwise); the status reads
+  `perfect clear i/N (search, SRS+, 4 lines)`;
+- each later board is read against the solve as a drawing (cleared rows
+  inferred, as for setups), so placed pieces drop out; a board that
+  follows no found solve drops them and searches again from that board.
+
+The 2nd PC with source rules keeps the source solves (`[source]`); the
+searched solves are used for Setup Konbini guidance.
+
+Checks:
+
+- `tests/pc_solutions.rs`: every one of the 1008 verified source solves
+  (`data/ijlo.json` and `data/cases/*.json`) is found by the search from
+  its finished setup with its pieces in any order (each piece kept to the
+  cells of its type, which prunes only the other solutions). The source
+  solves were checked with SRS 90-degree movement; all of them are also
+  reachable with SRS+.
+- `cargo run --release --example pc_timing`: the same 1008 setups with the
+  solve's pieces shuffled into a queue, HOLD empty, cold cache. The 988
+  searches of at most 7 pieces (what the overlay sees) take 3.6 ms on
+  average and 31 ms at worst; with up to 9 pieces (setups of one piece)
+  7.7 ms on average and 475 ms at worst. 950 of the 1008 queues allow a
+  perfect clear; the source solve itself is among them in 567 of 921
+  comparable cases, since a shuffled order often rules it out.
+- `cargo test --bin run-overlay`: a built TILJ setup is announced, `S`
+  shows a 24-cell solve, `Ctrl+Alt+N` switches to a different one, and a
+  placed solve piece drops out.
+
+Not done: solves for a source setup whose own solves do not apply, the
+undisclosed pieces after NEXT, and a check in TETR.IO.
+
+## Settings window (`pc-overlay-gui`)
+
+```powershell
+cargo build --release
+.\target\release\pc-overlay-gui.exe      # run from the repository folder
+```
+
+A small window with four buttons and a status text, refreshed every second:
+
+- **Start overlay / Stop overlay**: runs `run-overlay.exe` from the same
+  folder as the window (stop kills the process; the overlay has no other
+  exit than Ctrl+C).
+- **Calibrate board**: runs `configure-overlay.exe` (drag over the board,
+  Enter saves, Esc cancels); restart the overlay afterwards.
+- **Download Setup Konbini**: the same download as `fetch-konbini`, in the
+  background.
+- Status: whether the overlay and the calibration run, the saved
+  calibration ratios (or that the default profile is used), the source
+  rules found, how many of the 7 Konbini sheets are cached, and the last
+  message. Below it, the hotkey list.
+
+Choice: plain Win32 through `windows-sys`, which the overlay already uses
+(`BUTTON` and `STATIC` controls, a 1-second `WM_TIMER`), so the GUI adds no
+dependency. egui/eframe would add a GPU or GL backend and about 200 crates
+for four buttons and a text block; worth it only if the window grows
+editable settings or a live board preview.
+
+Tests: `cargo test --bin pc-overlay-gui` (status text, missing data,
+hotkey list). The window was opened and captured on 2026-10-21 (layout
+checked); the buttons were not pressed, so starting the overlay and the
+calibration from it, and the download, are not verified.
+
+Design notes for later: the window only knows whether the overlay process
+runs. Showing the overlay's own status (PC number, guidance origin, solve
+count) needs a channel from `run-overlay`, e.g. a status line written to
+stdout and read through a pipe, or a small JSON file. Editable settings
+(paths, `--reviewed-only`, the Konbini preference) would become
+command-line arguments of the started overlay.
 
 ## TETR.IO display-scale calibration
 
@@ -447,12 +586,9 @@ whole queue known before the game starts.
    continue to receive only complete, stable observations.
 5. Done (2026-10-18): every case of the source is generated by
    `tools/build_cases.py` (see "Generated cases"). Not yet tried in TETR.IO.
-6. Planned: integrate knewjade's solution-finder to show several solves at
-   once and to support SRS+ (180-degree rotation). The same search would
-   also find the solves after a Setup Konbini setup; the setups themselves
-   are already checked for the live queue (see "Setup Konbini mode"). Until then solves come
-   only from the source diagrams, checked with SRS 90-degree movement by
-   `tools/ijlo_solves.py`.
+6. Done (2026-10-21): a Rust perfect-clear search after solution-finder
+   with SRS+ finds the solves after a Setup Konbini setup, several at once
+   (see "Perfect-clear solve search"). Not yet tried in TETR.IO.
 7. TODO (found 2026-10-21): resetting the board with `R` in TETR.IO breaks
    the PC number. The tracker advances it on every board that empties, and
    a restarted game cannot be told from a PC by the piece sequence, since

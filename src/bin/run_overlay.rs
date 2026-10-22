@@ -11,10 +11,10 @@ use pc_overlay_core::{
     BoardCalibration, CommitOutcome, DiagramSet, FrameSize, OverlayBoard, OverlayCell,
     OverlayCellKind, OverlayState, OverlayWindow, Piece, RecognizerConfig, RuleSet, SessionTracker,
     SolveProgress, StabilityConfig, StabilityFilter, TetrioRecognizer, TrackerConfig, WindowInfo,
-    WindowLocator,
+    WindowLocator, board_is_empty,
     finder::{Buildable, Finder},
     konbini,
-    konbini::{BuildQuery, KonbiniLibrary, KonbiniProgress},
+    konbini::{BuildQuery, FoundSolve, KonbiniLibrary, KonbiniProgress},
     piece_code,
 };
 
@@ -77,10 +77,15 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut solve_hotkeys = SolveHotkeys::default();
     let mut solve_notice: Option<(&'static str, Instant)> = None;
     let mut konbini_hotkeys = KonbiniHotkeys::default();
-    let mut konbini_mode = KonbiniMode::new(args.konbini.clone());
+    let mut konbini = KonbiniGuide::new(args.konbini.clone());
+    konbini.load_or_fetch();
+    // Ctrl+Alt+K: the 2nd PC uses Setup Konbini even when the source has rules.
+    let mut prefer_konbini = false;
+    // Whether the last stable frame showed a completed setup with a solve.
+    let mut solve_available = false;
     let mut overlay = OverlayWindow::new()?;
     println!(
-        "run-overlay started; Ctrl+Alt+1..7 resynchronizes the PC number; S shows / Ctrl+Alt+S toggles the solve once the setup is complete; Ctrl+Alt+K toggles Setup Konbini mode (Ctrl+Alt+N / Ctrl+Alt+B switch setups, Ctrl+Alt+F refetches); press Ctrl+C to stop"
+        "run-overlay started; Ctrl+Alt+1..7 resynchronizes the PC number; S shows / Ctrl+Alt+S toggles the solve once the setup is complete; Ctrl+Alt+N / Ctrl+Alt+B switch setups; Ctrl+Alt+K makes the 2nd PC use Setup Konbini; Ctrl+Alt+F refetches Setup Konbini; press Ctrl+C to stop"
     );
 
     loop {
@@ -93,15 +98,25 @@ fn main() -> Result<(), Box<dyn Error>> {
             eprintln!("PC number manually resynchronized to {}", ordinal.get());
         }
         if let Some(hotkey) = konbini_hotkeys.poll() {
-            konbini_mode.apply(hotkey);
-        }
-        konbini_mode.poll_fetch();
-        if let Some(hotkey) = solve_hotkeys.poll() {
-            let setup_complete = latest_setup_complete(&library, &tracker, args.reviewed_only);
-            if let Some(notice) = apply_solve_hotkey(&mut tracker, hotkey, setup_complete) {
+            if hotkey == KonbiniHotkey::PreferKonbini {
+                prefer_konbini = !prefer_konbini;
+                let notice = if prefer_konbini {
+                    "2nd PC: Setup Konbini"
+                } else {
+                    "2nd PC: source rules first"
+                };
                 eprintln!("{notice}");
                 solve_notice = Some((notice, Instant::now()));
+            } else {
+                konbini.apply(hotkey);
             }
+        }
+        konbini.poll_fetch();
+        if let Some(hotkey) = solve_hotkeys.poll()
+            && let Some(notice) = apply_solve_hotkey(&mut tracker, hotkey, solve_available)
+        {
+            eprintln!("{notice}");
+            solve_notice = Some((notice, Instant::now()));
         }
         let active_notice = solve_notice
             .filter(|(_, at)| at.elapsed() < SOLVE_NOTICE_DURATION)
@@ -142,6 +157,26 @@ fn main() -> Result<(), Box<dyn Error>> {
                     )),
                     _ => None,
                 };
+                let guide = match stable.as_ref() {
+                    Some(pc_overlay_core::StabilityOutcome::Stable { .. }) => {
+                        tracker.snapshots().last().map(|snapshot| {
+                            unified_guidance(
+                                &library,
+                                &mut konbini,
+                                &tracker,
+                                snapshot,
+                                args.reviewed_only,
+                                prefer_konbini,
+                            )
+                        })
+                    }
+                    _ => None,
+                };
+                // Kept from the last tracked state while frames are unstable,
+                // as the solve hotkeys were judged on the latest snapshot.
+                if let Some(guide) = &guide {
+                    solve_available = guide.setup_complete;
+                }
                 let mut state = build_overlay_state(
                     &window,
                     &frame,
@@ -149,17 +184,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                     stable.as_ref(),
                     commit.as_ref(),
                     &tracker,
-                    &library,
-                    args.reviewed_only,
+                    guide,
                     args.verbose,
                 );
-                if konbini_mode.enabled {
-                    let stable_now = matches!(
-                        stable,
-                        Some(pc_overlay_core::StabilityOutcome::Stable { .. })
-                    );
-                    konbini_mode.decorate(&mut state, &tracker, stable_now);
-                } else if let Some(notice) = active_notice {
+                if let Some(notice) = active_notice {
                     state.status.push_str(" | ");
                     state.status.push_str(notice);
                 }
@@ -293,8 +321,9 @@ fn apply_solve_hotkey(
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum KonbiniHotkey {
-    /// Ctrl+Alt+K: Setup Konbini mode ON / OFF.
-    Toggle,
+    /// Ctrl+Alt+K: the 2nd PC uses Setup Konbini even when the source has
+    /// rules for its case (press again to go back).
+    PreferKonbini,
     /// Ctrl+Alt+N: the next candidate setup.
     Next,
     /// Ctrl+Alt+B: the previous candidate setup.
@@ -315,7 +344,7 @@ impl KonbiniHotkeys {
         const VK_CONTROL: i32 = 0x11;
         const VK_MENU: i32 = 0x12;
         const KEYS: [(i32, KonbiniHotkey); 4] = [
-            (0x4B, KonbiniHotkey::Toggle),
+            (0x4B, KonbiniHotkey::PreferKonbini),
             (0x4E, KonbiniHotkey::Next),
             (0x42, KonbiniHotkey::Previous),
             (0x46, KonbiniHotkey::Refetch),
@@ -339,11 +368,79 @@ impl KonbiniHotkeys {
     }
 }
 
-/// Setup Konbini mode: replaces the normal guidance with a setup from the
-/// sheet of the tracked PC number. The sheets are read from the cache
-/// folder, and downloaded in the background when it is empty.
-struct KonbiniMode {
-    enabled: bool,
+/// Where the guidance on screen comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Origin {
+    /// The verified 2nd-PC rules from "Algebruh's 2nd Methods".
+    Source,
+    /// A Setup Konbini setup the live queue can build.
+    Konbini,
+}
+
+impl Origin {
+    fn label(self) -> &'static str {
+        match self {
+            Origin::Source => "source",
+            Origin::Konbini => "Konbini",
+        }
+    }
+}
+
+/// The guidance for one tracked state.
+#[derive(Debug, Clone)]
+struct Guide {
+    status: String,
+    cells: Vec<OverlayCell>,
+    origin: Origin,
+    /// Whether a solve hotkey press may turn the solve display ON.
+    setup_complete: bool,
+    /// Why the source rules were not used, for the detail line.
+    note: Option<String>,
+}
+
+/// One guidance for every PC. The 2nd PC uses the source rules when they
+/// select a setup for the case; otherwise, and on every other PC, a Setup
+/// Konbini setup the live queue can build is shown.
+fn unified_guidance(
+    library: &Library,
+    konbini: &mut KonbiniGuide,
+    tracker: &SessionTracker,
+    snapshot: &pc_overlay_core::tracker::Snapshot,
+    reviewed_only: bool,
+    prefer_konbini: bool,
+) -> Guide {
+    let mut note = None;
+    if snapshot.pc_ordinal.get() == 2 {
+        if prefer_konbini {
+            note = Some("source rules skipped (Ctrl+Alt+K)".to_string());
+        } else {
+            match guidance_stage(library, tracker, snapshot, reviewed_only) {
+                GuidanceStage::Inactive(message) => {
+                    note = Some(message.replacen("PC Overlay: ", "source: ", 1));
+                }
+                stage => {
+                    let setup_complete = matches!(stage, GuidanceStage::SetupComplete { .. });
+                    let (status, cells) = render_stage(library, tracker, snapshot, stage);
+                    return Guide {
+                        status: status.replacen("PC Overlay:", "PC Overlay [source]:", 1),
+                        cells,
+                        origin: Origin::Source,
+                        setup_complete,
+                        note: None,
+                    };
+                }
+            }
+        }
+    }
+    let mut guide = konbini.guide(tracker, snapshot);
+    guide.note = note;
+    guide
+}
+
+/// Setup Konbini as a guidance source: the sheet of the tracked PC number.
+/// The sheets are read from the cache folder, and downloaded in the
+/// background when it is empty.
+struct KonbiniGuide {
     dir: PathBuf,
     library: Option<KonbiniLibrary>,
     fetching: Option<mpsc::Receiver<Result<KonbiniLibrary, String>>>,
@@ -355,7 +452,23 @@ struct KonbiniMode {
     finder: Finder,
     /// Candidates of the last searched state, reused until it changes.
     shortlist: Option<(ShortlistKey, Vec<Shortlisted>)>,
+    /// Perfect clears found once a setup was built, while the board still
+    /// follows one of them.
+    solve: Option<SolveSession>,
+    /// The last state searched for a perfect clear, so a state without one
+    /// is searched once.
+    searched: Option<pc_overlay_core::Observation>,
 }
+
+/// Perfect clears found by the solve search, cycled by Ctrl+Alt+N / B.
+#[derive(Debug, Clone)]
+struct SolveSession {
+    solves: Vec<FoundSolve>,
+    index: isize,
+}
+
+/// Perfect clears kept per search.
+const SOLVE_LIMIT: usize = 100;
 
 /// What a shortlist depends on: PC number, observation, and PC pieces.
 type ShortlistKey = (u8, pc_overlay_core::Observation, Vec<Piece>);
@@ -371,10 +484,9 @@ struct Shortlisted {
 /// Move-generation cache entries kept before the cache is dropped.
 const FINDER_CACHE_LIMIT: usize = 200_000;
 
-impl KonbiniMode {
+impl KonbiniGuide {
     fn new(dir: PathBuf) -> Self {
         Self {
-            enabled: false,
             dir,
             library: None,
             fetching: None,
@@ -383,28 +495,38 @@ impl KonbiniMode {
             pc_key: None,
             finder: Finder::new(),
             shortlist: None,
+            solve: None,
+            searched: None,
+        }
+    }
+
+    /// Reads the cached sheets, or starts downloading them when there are
+    /// none.
+    fn load_or_fetch(&mut self) {
+        match KonbiniLibrary::load_dir(&self.dir) {
+            Ok(library) => {
+                eprintln!("Setup Konbini: {} setups loaded", library.setups.len());
+                self.library = Some(library);
+            }
+            Err(konbini::KonbiniError::NotFetched(_)) => self.start_fetch(),
+            Err(error) => self.error = Some(error.to_string()),
         }
     }
 
     fn apply(&mut self, hotkey: KonbiniHotkey) {
         match hotkey {
-            KonbiniHotkey::Toggle => {
-                self.enabled = !self.enabled;
-                eprintln!(
-                    "Setup Konbini mode {}",
-                    if self.enabled { "ON" } else { "OFF" }
-                );
-                if self.enabled && self.library.is_none() && self.fetching.is_none() {
-                    match KonbiniLibrary::load_dir(&self.dir) {
-                        Ok(library) => self.library = Some(library),
-                        Err(konbini::KonbiniError::NotFetched(_)) => self.start_fetch(),
-                        Err(error) => self.error = Some(error.to_string()),
-                    }
-                }
-            }
-            KonbiniHotkey::Next => self.index += 1,
+            // Handled by the caller, which owns the preference.
+            KonbiniHotkey::PreferKonbini => {}
+            // With perfect clears found, N / B switch between them.
+            KonbiniHotkey::Next => match &mut self.solve {
+                Some(session) => session.index += 1,
+                None => self.index += 1,
+            },
             // Wraps to the last candidate once the count is known.
-            KonbiniHotkey::Previous => self.index -= 1,
+            KonbiniHotkey::Previous => match &mut self.solve {
+                Some(session) => session.index -= 1,
+                None => self.index -= 1,
+            },
             KonbiniHotkey::Refetch => {
                 if self.fetching.is_none() {
                     self.start_fetch();
@@ -435,6 +557,7 @@ impl KonbiniMode {
             Ok(Ok(library)) => {
                 eprintln!("Setup Konbini: {} setups loaded", library.setups.len());
                 self.library = Some(library);
+                self.shortlist = None;
                 self.fetching = None;
             }
             Ok(Err(error)) => {
@@ -450,18 +573,21 @@ impl KonbiniMode {
         }
     }
 
-    /// Replaces the status and cells of a stable frame with the Setup
-    /// Konbini view. Other frames keep their status with a mode marker and
-    /// draw nothing, so a stale setup is never shown.
-    fn decorate(&mut self, state: &mut OverlayState, tracker: &SessionTracker, stable_now: bool) {
+    /// The Setup Konbini guidance for a stable tracked state.
+    fn guide(
+        &mut self,
+        tracker: &SessionTracker,
+        snapshot: &pc_overlay_core::tracker::Snapshot,
+    ) -> Guide {
         let pc_key = tracker
             .current_pc_start()
             .map(|start| (start.pc_ordinal.get(), start.timestamp_ms));
         if pc_key != self.pc_key {
             self.pc_key = pc_key;
             self.index = 0;
+            self.solve = None;
+            self.searched = None;
         }
-        state.cells.clear();
         let message = if self.fetching.is_some() {
             Some("fetching Setup Konbini...".to_string())
         } else if let Some(error) = &self.error {
@@ -471,17 +597,17 @@ impl KonbiniMode {
         } else {
             None
         };
-        if let Some(message) = message {
-            state.status = format!("PC Overlay [Konbini]: {message}");
-            return;
-        }
-        let (Some(library), Some(snapshot), true) =
-            (&self.library, tracker.snapshots().last(), stable_now)
-        else {
-            state.status = state
-                .status
-                .replacen("PC Overlay", "PC Overlay [Konbini]", 1);
-            return;
+        let Some(library) = self.library.as_ref().filter(|_| message.is_none()) else {
+            return Guide {
+                status: format!(
+                    "PC Overlay [Konbini]: {}",
+                    message.expect("set when there is no library")
+                ),
+                cells: Vec::new(),
+                origin: Origin::Konbini,
+                setup_complete: false,
+                note: None,
+            };
         };
         let key = (
             snapshot.pc_ordinal.get(),
@@ -500,10 +626,109 @@ impl KonbiniMode {
             self.shortlist = Some((key, shortlist));
         }
         let shortlist = &self.shortlist.as_ref().expect("just computed").1;
-        let (status, cells) = konbini_render(library, snapshot, shortlist, &mut self.index);
-        state.status = status;
-        state.cells = cells;
+        let observation = &snapshot.observation;
+        let show = tracker.guidance().show_solve;
+        if let Some(guide) = solve_guide(&mut self.solve, snapshot, show) {
+            return guide;
+        }
+        let guide = konbini_render(library, snapshot, shortlist, &mut self.index);
+        let shown_complete = usize::try_from(self.index)
+            .ok()
+            .and_then(|index| shortlist.get(index))
+            .is_some_and(|candidate| candidate.progress.complete());
+        let board_off_setup = shortlist.is_empty() && !board_is_empty(&observation.board);
+        if (shown_complete || board_off_setup) && self.searched.as_ref() != Some(observation) {
+            // A built setup, or a board no setup explains (the player went
+            // their own way): search the perfect clears from here.
+            self.searched = Some(observation.clone());
+            let solves = konbini::find_perfect_clears(&mut self.finder, observation, SOLVE_LIMIT);
+            if !solves.is_empty() {
+                self.solve = Some(SolveSession { solves, index: 0 });
+                if let Some(guide) = solve_guide(&mut self.solve, snapshot, show) {
+                    return guide;
+                }
+            }
+        }
+        if shown_complete || board_off_setup {
+            let stage = konbini::stage_label(snapshot.pc_ordinal.get());
+            let status = if shown_complete {
+                guide.status.replacen(
+                    " setup complete (no solve data)",
+                    " setup complete; no perfect clear with HOLD + NEXT",
+                    1,
+                )
+            } else {
+                format!(
+                    "PC Overlay [Konbini {stage}]: no setup matches the board and no perfect clear with HOLD + NEXT"
+                )
+            };
+            return Guide { status, ..guide };
+        }
+        guide
     }
+}
+
+/// The perfect clear the board follows, if a search found one: shown when
+/// the solve display is ON, announced otherwise. A board that follows none
+/// drops the session.
+fn solve_guide(
+    solve: &mut Option<SolveSession>,
+    snapshot: &pc_overlay_core::tracker::Snapshot,
+    show: bool,
+) -> Option<Guide> {
+    let observation = &snapshot.observation;
+    let stage = konbini::stage_label(snapshot.pc_ordinal.get());
+    let session = solve.as_mut()?;
+    let count = session.solves.len();
+    let start = session.index.rem_euclid(count as isize) as usize;
+    let Some((position, progress)) =
+        (0..count)
+            .map(|offset| (start + offset) % count)
+            .find_map(|position| {
+                session.solves[position]
+                    .progress(&observation.board)
+                    .map(|progress| (position, progress))
+            })
+    else {
+        *solve = None;
+        return None;
+    };
+    session.index = position as isize;
+    let height = session.solves[position].height;
+    let status = if show {
+        format!(
+            "PC Overlay [Konbini {stage}]: perfect clear {}/{count} (search, SRS+, {height} lines); Ctrl+Alt+N/B to switch",
+            position + 1
+        )
+    } else {
+        format!(
+            "PC Overlay [Konbini {stage}]: {count} perfect clear(s) found ({height} lines); press S to show the solve"
+        )
+    };
+    let cells = if show {
+        progress
+            .remaining
+            .iter()
+            .map(|cell| OverlayCell {
+                cell: cell.cell,
+                piece: cell.piece,
+                kind: if cell.piece == Some(observation.current) {
+                    OverlayCellKind::Current
+                } else {
+                    OverlayCellKind::Missing
+                },
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    Some(Guide {
+        status,
+        cells,
+        origin: Origin::Konbini,
+        setup_complete: true,
+        note: None,
+    })
 }
 
 /// The PC's pieces from its start: HOLD, then the queue disclosed since.
@@ -554,26 +779,30 @@ fn konbini_guidance(
     index: &mut isize,
 ) -> (String, Vec<OverlayCell>) {
     let shortlist = konbini_shortlist(library, &mut Finder::new(), tracker, snapshot);
-    konbini_render(library, snapshot, &shortlist, index)
+    let guide = konbini_render(library, snapshot, &shortlist, index);
+    (guide.status, guide.cells)
 }
 
-/// The candidate at `index` (wrapped into range): status line and cells.
+/// The candidate at `index` (wrapped into range).
 fn konbini_render(
     library: &KonbiniLibrary,
     snapshot: &pc_overlay_core::tracker::Snapshot,
     candidates: &[Shortlisted],
     index: &mut isize,
-) -> (String, Vec<OverlayCell>) {
+) -> Guide {
     let stage = snapshot.pc_ordinal.get();
     let label = konbini::stage_label(stage);
     if candidates.is_empty() {
-        return (
-            format!(
+        return Guide {
+            status: format!(
                 "PC Overlay [Konbini {label}]: no buildable setup matches the board ({} in sheet)",
                 library.stage_count(stage)
             ),
-            Vec::new(),
-        );
+            cells: Vec::new(),
+            origin: Origin::Konbini,
+            setup_complete: false,
+            note: None,
+        };
     }
     let position = index.rem_euclid(candidates.len() as isize) as usize;
     *index = position as isize;
@@ -589,7 +818,7 @@ fn konbini_render(
         format!(" [{}]", setup.source)
     };
     let complete = if candidate.progress.complete() {
-        " setup complete"
+        " setup complete (no solve data)"
     } else if candidate.buildable == Buildable::Sometimes {
         " depends on next pieces"
     } else {
@@ -616,7 +845,13 @@ fn konbini_render(
             },
         })
         .collect();
-    (status, cells)
+    Guide {
+        status,
+        cells,
+        origin: Origin::Konbini,
+        setup_complete: false,
+        note: None,
+    }
 }
 
 #[cfg(windows)]
@@ -634,8 +869,7 @@ fn build_overlay_state(
     stable: Option<&pc_overlay_core::StabilityOutcome>,
     commit: Option<&CommitOutcome>,
     tracker: &SessionTracker,
-    library: &Library,
-    reviewed_only: bool,
+    guide: Option<Guide>,
     verbose: bool,
 ) -> OverlayState {
     let frame_size = FrameSize {
@@ -685,17 +919,19 @@ fn build_overlay_state(
                 "PC Overlay: recognition confidence too low".to_string(),
                 Vec::new(),
             ),
-            Some(pc_overlay_core::StabilityOutcome::Stable { .. }) => {
-                match tracker.snapshots().last() {
-                    Some(snapshot) => {
-                        guidance_for_snapshot(library, tracker, snapshot, reviewed_only)
+            Some(pc_overlay_core::StabilityOutcome::Stable { .. }) => match guide {
+                Some(guide) => {
+                    detail.push_str(&format!("  guide={}", guide.origin.label()));
+                    if let Some(note) = &guide.note {
+                        detail.push_str(&format!(" ({note})"));
                     }
-                    None => (
-                        "PC Overlay: waiting for first tracked state".to_string(),
-                        Vec::new(),
-                    ),
+                    (guide.status, guide.cells)
                 }
-            }
+                None => (
+                    "PC Overlay: waiting for first tracked state".to_string(),
+                    Vec::new(),
+                ),
+            },
             None => (
                 "PC Overlay: recognition paused (unknown or unstable)".to_string(),
                 Vec::new(),
@@ -809,8 +1045,9 @@ enum GuidanceStage<'a> {
     },
 }
 
-/// Whether the latest tracked state has a completed setup, i.e. whether a
-/// solve hotkey press may turn the display ON.
+/// Whether the latest tracked state has a completed source setup, i.e.
+/// whether a solve hotkey press may turn the display ON.
+#[cfg(test)]
 fn latest_setup_complete(library: &Library, tracker: &SessionTracker, reviewed_only: bool) -> bool {
     tracker.snapshots().last().is_some_and(|snapshot| {
         matches!(
@@ -820,17 +1057,30 @@ fn latest_setup_complete(library: &Library, tracker: &SessionTracker, reviewed_o
     })
 }
 
+/// The source-rule guidance alone (without the Setup Konbini fallback).
+#[cfg(test)]
 fn guidance_for_snapshot(
     library: &Library,
     tracker: &SessionTracker,
     snapshot: &pc_overlay_core::tracker::Snapshot,
     reviewed_only: bool,
 ) -> (String, Vec<OverlayCell>) {
+    let stage = guidance_stage(library, tracker, snapshot, reviewed_only);
+    render_stage(library, tracker, snapshot, stage)
+}
+
+/// Status line and cells of a source-rule guidance stage.
+fn render_stage(
+    library: &Library,
+    tracker: &SessionTracker,
+    snapshot: &pc_overlay_core::tracker::Snapshot,
+    stage: GuidanceStage<'_>,
+) -> (String, Vec<OverlayCell>) {
     let case = library
         .for_tracker(tracker)
         .map(|rules| rules.case.id.as_str())
         .unwrap_or("2nd PC");
-    let setup = match guidance_stage(library, tracker, snapshot, reviewed_only) {
+    let setup = match stage {
         GuidanceStage::Inactive(message) => return (message, Vec::new()),
         GuidanceStage::SetupComplete {
             setup,
@@ -1521,31 +1771,17 @@ mod tests {
     }
 
     #[test]
-    fn konbini_mode_draws_nothing_on_unstable_frames_and_resets_per_pc() {
-        let mut mode = KonbiniMode::new(PathBuf::from("unused"));
-        mode.enabled = true;
+    fn konbini_guide_cycles_and_resets_per_pc() {
+        let mut mode = KonbiniGuide::new(PathBuf::from("unused"));
         mode.library = Some(konbini_library());
         let tracker = tilj_pc_two();
-        let mut state = OverlayState {
-            status: "PC Overlay: waiting for stable frame (1/3)".to_string(),
-            cells: vec![OverlayCell {
-                cell: Cell { x: 0, y: 0 },
-                piece: None,
-                kind: OverlayCellKind::Missing,
-            }],
-            ..OverlayState::default()
-        };
-        mode.decorate(&mut state, &tracker, false);
-        assert_eq!(
-            state.status,
-            "PC Overlay [Konbini]: waiting for stable frame (1/3)"
-        );
-        assert!(state.cells.is_empty());
-
+        let snapshot = tracker.snapshots().last().unwrap();
+        assert!(mode.guide(&tracker, snapshot).status.contains("(1/2)"));
         mode.apply(KonbiniHotkey::Next);
-        mode.decorate(&mut state, &tracker, true);
-        assert!(state.status.contains("(2/2)"), "{}", state.status);
-        assert_eq!(state.cells.len(), 16);
+        let guide = mode.guide(&tracker, snapshot);
+        assert!(guide.status.contains("(2/2)"), "{}", guide.status);
+        assert_eq!(guide.cells.len(), 16);
+        assert_eq!(guide.origin, Origin::Konbini);
 
         // A new PC starts again from the best setup.
         let mut tracker = tracker;
@@ -1566,7 +1802,226 @@ mod tests {
             0.75,
             4,
         );
-        mode.decorate(&mut state, &tracker, true);
-        assert!(state.status.contains("(1/2)"), "{}", state.status);
+        let snapshot = tracker.snapshots().last().unwrap();
+        let guide = mode.guide(&tracker, snapshot);
+        assert!(guide.status.contains("(1/2)"), "{}", guide.status);
+    }
+
+    #[test]
+    fn konbini_guide_explains_missing_data() {
+        let mut mode = KonbiniGuide::new(PathBuf::from("unused"));
+        let tracker = tilj_pc_two();
+        let guide = mode.guide(&tracker, tracker.snapshots().last().unwrap());
+        assert_eq!(
+            guide.status,
+            "PC Overlay [Konbini]: no data; press Ctrl+Alt+F to fetch"
+        );
+        assert!(guide.cells.is_empty() && !guide.setup_complete);
+    }
+
+    fn unified(
+        library: &Library,
+        konbini: &mut KonbiniGuide,
+        tracker: &SessionTracker,
+        prefer_konbini: bool,
+    ) -> Guide {
+        unified_guidance(
+            library,
+            konbini,
+            tracker,
+            tracker.snapshots().last().unwrap(),
+            true,
+            prefer_konbini,
+        )
+    }
+
+    fn konbini_guide() -> KonbiniGuide {
+        let mut konbini = KonbiniGuide::new(PathBuf::from("unused"));
+        let mut library = konbini_library();
+        // One 3rd-PC setup, so a later PC has a sheet of its own.
+        library.add_stage_csv(3, KONBINI_SECOND);
+        konbini.library = Some(library);
+        konbini
+    }
+
+    #[test]
+    fn unified_guidance_prefers_the_source_rules_on_the_second_pc() {
+        let library = ijlo_rules();
+        let mut konbini = konbini_guide();
+        let tracker = s_queue_pc_two();
+        let guide = unified(&library, &mut konbini, &tracker, false);
+        assert_eq!(guide.origin, Origin::Source);
+        assert!(
+            guide
+                .status
+                .starts_with("PC Overlay [source]: IJLO guidance active (ijlo_s_queue)"),
+            "{}",
+            guide.status
+        );
+        assert_eq!(guide.cells.len(), 16);
+        assert!(!guide.setup_complete && guide.note.is_none());
+
+        // Ctrl+Alt+K hands the same state to Setup Konbini.
+        let guide = unified(&library, &mut konbini, &tracker, true);
+        assert_eq!(guide.origin, Origin::Konbini);
+        assert!(guide.status.starts_with("PC Overlay [Konbini 2nd]"));
+        assert_eq!(
+            guide.note.as_deref(),
+            Some("source rules skipped (Ctrl+Alt+K)")
+        );
+    }
+
+    #[test]
+    fn unified_guidance_marks_a_completed_source_setup() {
+        let library = ijlo_rules();
+        let setup = library.setup("ijlo_source_method", "ijlo_s_queue").unwrap();
+        let mut konbini = konbini_guide();
+        let mut tracker = s_queue_pc_two();
+        commit_board(&mut tracker, board_with(&setup.placements), 3);
+        let guide = unified(&library, &mut konbini, &tracker, false);
+        assert_eq!(guide.origin, Origin::Source);
+        assert!(guide.setup_complete);
+        assert!(
+            guide.status.contains("press S to show the solve"),
+            "{}",
+            guide.status
+        );
+    }
+
+    #[test]
+    fn unified_guidance_falls_back_to_konbini_without_source_rules() {
+        // IJLO only: the TILJ case has no source rules.
+        let library = ijlo_rules();
+        let mut konbini = konbini_guide();
+        let tracker = tilj_pc_two();
+        let guide = unified(&library, &mut konbini, &tracker, false);
+        assert_eq!(guide.origin, Origin::Konbini);
+        assert!(
+            guide
+                .status
+                .contains("[Konbini 2nd]: TILJ 100.00% [KNEWJADE] (1/2)"),
+            "{}",
+            guide.status
+        );
+        assert_eq!(guide.cells.len(), 16);
+        let note = guide.note.unwrap();
+        assert!(note.contains("no data for the four-piece case"), "{note}");
+    }
+
+    #[test]
+    fn unified_guidance_uses_konbini_on_other_pcs() {
+        let library = ijlo_rules();
+        let mut konbini = konbini_guide();
+        let mut tracker = tilj_pc_two();
+        tracker.resync(pc_overlay_core::PcOrdinal::new(3).unwrap());
+        tracker.commit(
+            observation(
+                None,
+                Piece::T,
+                [Piece::I, Piece::L, Piece::J, Piece::O, Piece::S],
+            ),
+            0.75,
+            3,
+        );
+        assert_eq!(tracker.pc_ordinal().get(), 3);
+        let guide = unified(&library, &mut konbini, &tracker, false);
+        assert_eq!(guide.origin, Origin::Konbini);
+        assert!(
+            guide.status.starts_with("PC Overlay [Konbini 3rd]"),
+            "{}",
+            guide.status
+        );
+        assert!(guide.note.is_none());
+    }
+
+    /// The 2nd PC after the 100% TILJ setup is built, with this HOLD and queue.
+    fn tilj_setup_built(hold: Option<Piece>, current: Piece, next5: [Piece; 5]) -> SessionTracker {
+        let library = konbini_library();
+        let setup = library
+            .setups
+            .iter()
+            .find(|setup| setup.sol_percent == Some(100.0))
+            .unwrap();
+        let mut tracker = tilj_pc_two();
+        let mut built = observation(hold, current, next5);
+        for cell in &setup.cells {
+            built.board[usize::from(cell.cell.y)][usize::from(cell.cell.x)] = cell.piece;
+        }
+        assert!(matches!(
+            tracker.commit(built, 0.75, 3),
+            CommitOutcome::Accepted { .. }
+        ));
+        tracker
+    }
+
+    #[test]
+    fn a_built_konbini_setup_gets_searched_perfect_clears() {
+        let mut mode = KonbiniGuide::new(PathBuf::from("unused"));
+        mode.library = Some(konbini_library());
+        let queue = [Piece::S, Piece::Z, Piece::I, Piece::T, Piece::L];
+        let mut tracker = tilj_setup_built(Some(Piece::J), Piece::O, queue);
+        let snapshot = tracker.snapshots().last().unwrap().clone();
+        let guide = mode.guide(&tracker, &snapshot);
+        assert!(
+            guide
+                .status
+                .contains("perfect clear(s) found (4 lines); press S"),
+            "{}",
+            guide.status
+        );
+        assert!(guide.setup_complete && guide.cells.is_empty());
+        let count = mode.solve.as_ref().unwrap().solves.len();
+        assert!(count >= 1);
+
+        // S shows the first solve: 24 cells over the 16 of the setup.
+        apply_solve_hotkey(&mut tracker, SolveHotkey::Show, guide.setup_complete);
+        let guide = mode.guide(&tracker, &snapshot);
+        assert!(
+            guide
+                .status
+                .contains(&format!("perfect clear 1/{count} (search, SRS+, 4 lines)")),
+            "{}",
+            guide.status
+        );
+        assert_eq!(guide.cells.len(), 24);
+        let coloured = |cells: &[OverlayCell]| -> BTreeSet<(Cell, Option<Piece>)> {
+            cells.iter().map(|cell| (cell.cell, cell.piece)).collect()
+        };
+        let first = coloured(&guide.cells);
+
+        // N switches to the next solve when there is one.
+        mode.apply(KonbiniHotkey::Next);
+        let guide = mode.guide(&tracker, &snapshot);
+        if count > 1 {
+            assert!(
+                guide.status.contains(&format!("2/{count}")),
+                "{}",
+                guide.status
+            );
+            assert_ne!(coloured(&guide.cells), first);
+        }
+
+        // Placing the solve's first piece keeps the same solve, minus it.
+        let session = mode.solve.as_ref().unwrap();
+        let solve = &session.solves[session.index as usize];
+        let (piece, cells) = solve.steps[0];
+        let mut board = snapshot.observation.board;
+        for index in 0..60u32 {
+            if cells & (1 << index) != 0 {
+                board[(index / 10) as usize][(index % 10) as usize] = Some(piece);
+            }
+        }
+        let shown = guide.cells.len();
+        let mut placed = observation(
+            None,
+            Piece::S,
+            [Piece::Z, Piece::I, Piece::T, Piece::L, Piece::J],
+        );
+        placed.board = board;
+        tracker.commit(placed, 0.75, 4);
+        let snapshot = tracker.snapshots().last().unwrap().clone();
+        let guide = mode.guide(&tracker, &snapshot);
+        assert!(guide.status.contains("perfect clear"), "{}", guide.status);
+        assert_eq!(guide.cells.len(), shown - 4, "{}", guide.status);
     }
 }

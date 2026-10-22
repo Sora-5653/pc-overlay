@@ -6,7 +6,7 @@
 //! the setup cells come from the first page of the fumen. Candidates are the
 //! setups that match the board and can still be built from the live HOLD and
 //! queue with SRS+ (`crate::finder`), ranked by the sheet's solve rate.
-//! Whether a built setup then reaches a perfect clear is not searched.
+//! Once a setup is built, `find_perfect_clears` searches the solves.
 
 use std::{
     collections::BTreeSet,
@@ -18,7 +18,7 @@ use std::{
 use thiserror::Error;
 
 use crate::{
-    finder::{self, Buildable, Finder, Mask, Target},
+    finder::{self, Buildable, Finder, Mask, Step, Supply, Target},
     fumen::{FumenCell, decode_first_page},
     model::{Board, Cell, Observation, Piece},
 };
@@ -114,35 +114,141 @@ impl KonbiniSetup {
     /// has a block the setup does not explain (a cell outside it, or the
     /// wrong colour on a coloured cell); gray cells accept any piece.
     pub fn progress(&self, board: &Board) -> Option<KonbiniProgress> {
-        let mut field: Mask = 0;
-        for (y, row) in board.iter().enumerate() {
-            for (x, cell) in row.iter().enumerate() {
-                if cell.is_some() {
-                    if y >= finder::FIELD_ROWS {
-                        return None;
-                    }
-                    field |= finder::bit(x as u8, y as u8);
+        drawing_progress(&self.target, &self.cells, board)
+    }
+}
+
+/// Reads `board` as the drawing `cells` (with their `target`) in progress,
+/// inferring cleared rows; `None` when the board has a block the drawing
+/// does not explain.
+fn drawing_progress(
+    target: &Target,
+    cells: &[FumenCell],
+    board: &Board,
+) -> Option<KonbiniProgress> {
+    let field = board_field(board)?;
+    let placed = target.read_field(field, |x, y| {
+        board[usize::from(y)][usize::from(x)].expect("read_field asks for filled cells")
+    })?;
+    let remaining = target
+        .remaining_on_field(placed)
+        .into_iter()
+        .map(|(x, y, drawing_y)| FumenCell {
+            cell: Cell { x, y },
+            piece: cells
+                .iter()
+                .find(|cell| cell.cell == Cell { x, y: drawing_y })
+                .and_then(|cell| cell.piece),
+        })
+        .collect();
+    Some(KonbiniProgress { placed, remaining })
+}
+
+/// The board's blocks as a bitboard; `None` when one is above the rows the
+/// finder tracks.
+fn board_field(board: &Board) -> Option<Mask> {
+    let mut field: Mask = 0;
+    for (y, row) in board.iter().enumerate() {
+        for (x, cell) in row.iter().enumerate() {
+            if cell.is_some() {
+                if y >= finder::FIELD_ROWS {
+                    return None;
+                }
+                field |= finder::bit(x as u8, y as u8);
+            }
+        }
+    }
+    Some(field)
+}
+
+/// A perfect clear found by the solve search, kept as a drawing like a
+/// setup: the board it was found on plus its steps, without line clears.
+/// Later boards are read against it, so placed pieces drop out as rows
+/// clear.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FoundSolve {
+    /// The solve's pieces and drawing cells, sorted.
+    pub steps: Vec<Step>,
+    /// Lines the perfect clear clears.
+    pub height: usize,
+    cells: Vec<FumenCell>,
+    target: Target,
+}
+
+impl FoundSolve {
+    fn new(board: &Board, height: usize, steps: Vec<Step>) -> Option<Self> {
+        let mut cells = Vec::new();
+        for (y, row) in board.iter().enumerate().take(finder::FIELD_ROWS) {
+            for (x, piece) in row.iter().enumerate() {
+                if let Some(piece) = piece {
+                    cells.push(FumenCell {
+                        cell: Cell {
+                            x: x as u8,
+                            y: y as u8,
+                        },
+                        piece: Some(*piece),
+                    });
                 }
             }
         }
-        let placed = self.target.read_field(field, |x, y| {
-            board[usize::from(y)][usize::from(x)].expect("read_field asks for filled cells")
-        })?;
-        let remaining = self
-            .target
-            .remaining_on_field(placed)
-            .into_iter()
-            .map(|(x, y, drawing_y)| FumenCell {
-                cell: Cell { x, y },
-                piece: self
-                    .cells
-                    .iter()
-                    .find(|cell| cell.cell == Cell { x, y: drawing_y })
-                    .and_then(|cell| cell.piece),
-            })
-            .collect();
-        Some(KonbiniProgress { placed, remaining })
+        for (piece, mask) in &steps {
+            for index in 0..finder::FIELD_ROWS as u32 * 10 {
+                if mask & (1 << index) != 0 {
+                    cells.push(FumenCell {
+                        cell: Cell {
+                            x: (index % 10) as u8,
+                            y: (index / 10) as u8,
+                        },
+                        piece: Some(*piece),
+                    });
+                }
+            }
+        }
+        let target = Target::new(
+            cells
+                .iter()
+                .map(|cell| (cell.cell.x, cell.cell.y, cell.piece)),
+        )?;
+        Some(Self {
+            steps,
+            height,
+            cells,
+            target,
+        })
     }
+
+    /// The board read as this solve in progress.
+    pub fn progress(&self, board: &Board) -> Option<KonbiniProgress> {
+        drawing_progress(&self.target, &self.cells, board)
+    }
+}
+
+/// Perfect clears from the live board with its HOLD, Current, and NEXT
+/// (SRS+, one HOLD slot), at the lowest height that has one; at most
+/// `limit`. Empty when the board is too high or the known pieces cannot
+/// finish it.
+pub fn find_perfect_clears(
+    finder: &mut Finder,
+    observation: &Observation,
+    limit: usize,
+) -> Vec<FoundSolve> {
+    let Some(field) = board_field(&observation.board) else {
+        return Vec::new();
+    };
+    let queue: Vec<Piece> = std::iter::once(observation.current)
+        .chain(observation.next5)
+        .collect();
+    let supply = Supply::Queue {
+        hold: observation.hold,
+        queue: &queue,
+    };
+    let Some((height, solutions)) = finder.perfect_clears(field, supply, limit) else {
+        return Vec::new();
+    };
+    solutions
+        .into_iter()
+        .filter_map(|steps| FoundSolve::new(&observation.board, height, steps))
+        .collect()
 }
 
 /// The drawing cells already placed, and the rest as cells of the live

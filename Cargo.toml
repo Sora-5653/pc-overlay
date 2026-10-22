@@ -65,3 +65,7 @@ path = "src/bin/verify_ttrm.rs"
 [[bin]]
 name = "recover-seed"
 path = "src/bin/recover_seed.rs"
+
+[[bin]]
+name = "pc-overlay-gui"
+path = "src/bin/settings_gui.rs"
