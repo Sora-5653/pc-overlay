@@ -1,0 +1,38 @@
+# Formatting, lints, and tests on a clean Windows checkout.
+#
+# Windows because capture, window discovery, and the overlay are Windows-only
+# (`cfg(windows)`); a Linux runner would skip compiling them. Checks that need
+# data outside the repository (the `.ttrm` corpus, czsmall_nnue's Python
+# reconstruction, a running TETR.IO) are not run here; see the README.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Pinned to the local toolchain: each Rust release adds Clippy lints,
+      # which `-D warnings` would otherwise turn into sudden CI failures.
+      # Bump it together with the local toolchain.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97.1"
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --check
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+      # Release: the generated-case tests take about 4 minutes unoptimized
+      # and about 20 seconds optimized.
+      - name: Test
+        run: cargo test --release

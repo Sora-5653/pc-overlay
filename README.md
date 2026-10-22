@@ -197,6 +197,17 @@ than coverage.
 
 ## Verification
 
+GitHub Actions (`.github/workflows/ci.yml`) runs `cargo fmt --check`,
+`cargo clippy --all-targets -- -D warnings`, and `cargo test --release`
+(the generated-case tests take minutes unoptimized) on a clean
+Windows checkout for every pull request and every push to `main`. The
+workflow pins Rust 1.97.1, the local toolchain, because newer releases add
+Clippy lints (Rust 1.99 flags `chunks_exact(4)` and a manual
+lowest-bit isolation); update the pin together with the local toolchain. It
+covers only what the repository itself contains. The Python tools, captured
+TETR.IO sessions, and anything that needs a running TETR.IO are checked
+locally.
+
 ```powershell
 cargo test
 cargo run --bin validate-rules -- data/ijlo.json
