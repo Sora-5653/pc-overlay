@@ -45,7 +45,7 @@ pub use recognition::{
 pub use roi::{
     FrameSize, NormalizedRect, PixelRect, ResolvedRoiLayout, RoiLayout, RoiValidationError,
 };
-pub use rules::{RuleSet, RuleValidationError, Selection, SelectionReport};
+pub use rules::{RuleSet, RuleValidationError, Selection, SelectionReport, SourceSections};
 pub use stability::{StabilityConfig, StabilityFilter, StabilityOutcome};
 pub use tracker::{CommitOutcome, SessionTracker, TrackerConfig};
 pub use window::{WindowInfo, WindowLocator, WindowLocatorError, WindowRect, is_tetrio_title};

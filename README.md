@@ -282,6 +282,12 @@ Since 2026-10-21 `run-overlay` shows one guidance without a mode switch
 - The status line names the origin: `PC Overlay [source]: ...` or
   `PC Overlay [Konbini 2nd]: ...`; the detail line ends with
   `guide=source` / `guide=Konbini`.
+- Since 2026-10-22 a source setup also names its section of
+  `Algebruh's 2nd Methods.md`, from the line it cites:
+  `TILS guidance active (tils_image434_m · Odd JL, with T › TIJZ/TILS (mirrored))`.
+  `(mirrored)` marks a generated case that mirrors the section's case. The
+  document is read from the repository root (the parent of the rules'
+  `data/`); without it the section is left out.
 
 Hotkeys (changes from the two-mode version in bold):
 

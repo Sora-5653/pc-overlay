@@ -54,6 +54,67 @@ pub struct SourceReference {
     pub note: Option<String>,
 }
 
+/// The headings of a source document, to name the section a cited line is
+/// in ("Odd JL, with T › TIJZ/TILS"). Rules cite source lines, not headings,
+/// so the names follow the document instead of being copied into every rule.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SourceSections {
+    /// `(line, level, title)` for `##` and `###` headings, in order.
+    headings: Vec<(usize, usize, String)>,
+}
+
+impl SourceSections {
+    pub fn load(path: impl AsRef<Path>) -> std::io::Result<Self> {
+        Ok(Self::parse(&fs::read_to_string(path)?))
+    }
+
+    pub fn parse(markdown: &str) -> Self {
+        let mut headings = Vec::new();
+        for (index, line) in markdown.lines().enumerate() {
+            let level = line.chars().take_while(|ch| *ch == '#').count();
+            if !(2..=3).contains(&level) || !line[level..].starts_with(' ') {
+                continue;
+            }
+            // Drop images, Markdown escapes, and the source's `*` markers.
+            let mut title = line[level..].to_string();
+            while let Some(start) = title.find("![][") {
+                let name = start + "![][".len();
+                let end = title[name..]
+                    .find(']')
+                    .map_or(title.len(), |at| name + at + 1);
+                title.replace_range(start..end, "");
+            }
+            let title = title.replace(['\\', '*'], "");
+            let title = title.trim();
+            // A heading made only of images names no section.
+            if !title.is_empty() {
+                headings.push((index + 1, level, title.to_string()));
+            }
+        }
+        Self { headings }
+    }
+
+    /// The `##` section and, inside it, the `###` subsection that `line`
+    /// (1-based) belongs to, joined by ` › `.
+    pub fn section(&self, line: usize) -> Option<String> {
+        let before = self.headings.partition_point(|(at, _, _)| *at <= line);
+        let headings = &self.headings[..before];
+        let (major_at, major) = headings
+            .iter()
+            .rposition(|(_, level, _)| *level == 2)
+            .map(|index| (index, headings[index].2.as_str()))?;
+        let minor = headings[major_at + 1..]
+            .iter()
+            .rev()
+            .find(|(_, level, _)| *level == 3)
+            .map(|(_, _, title)| title.as_str());
+        Some(match minor {
+            Some(minor) => format!("{major} › {minor}"),
+            None => major.to_string(),
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CaseDefinition {
     pub id: String,
@@ -580,6 +641,38 @@ fn validate_placements(
 mod tests {
     use super::*;
     use crate::model::Cell;
+
+    #[test]
+    fn source_sections_name_the_heading_and_subheading_of_a_line() {
+        let sections = SourceSections::parse(
+            "# **Title**\n\
+             ## Odd JL, with T\n\
+             intro\n\
+             ### TIJS/TILZ \n\
+             text\n\
+             ### TIJZ/TILS \n\
+             setup ![][image434]\n\
+             ### ![][image561] ![][image562]\n\
+             after images\n\
+             ## Other Necessary Dupes\n\
+             ### TJOS/TLOZ\\*\n",
+        );
+        assert_eq!(sections.section(1), None);
+        assert_eq!(sections.section(3).as_deref(), Some("Odd JL, with T"));
+        assert_eq!(
+            sections.section(7).as_deref(),
+            Some("Odd JL, with T › TIJZ/TILS")
+        );
+        // An image-only heading keeps the previous subsection.
+        assert_eq!(
+            sections.section(9).as_deref(),
+            Some("Odd JL, with T › TIJZ/TILS")
+        );
+        assert_eq!(
+            sections.section(11).as_deref(),
+            Some("Other Necessary Dupes › TJOS/TLOZ")
+        );
+    }
 
     fn source() -> SourceReference {
         SourceReference {

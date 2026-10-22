@@ -10,8 +10,8 @@ use std::{
 use pc_overlay_core::{
     BoardCalibration, CommitOutcome, DiagramSet, FrameSize, OverlayBoard, OverlayCell,
     OverlayCellKind, OverlayState, OverlayWindow, Piece, RecognizerConfig, RuleSet, SessionTracker,
-    SolveProgress, StabilityConfig, StabilityFilter, TetrioRecognizer, TrackerConfig, WindowInfo,
-    WindowLocator, board_is_empty,
+    SolveProgress, SourceSections, StabilityConfig, StabilityFilter, TetrioRecognizer,
+    TrackerConfig, WindowInfo, WindowLocator, board_is_empty,
     finder::{Buildable, Finder},
     konbini,
     konbini::{BuildQuery, FoundSolve, KonbiniLibrary, KonbiniProgress},
@@ -57,7 +57,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             eprintln!("warning: {issue}");
         }
     }
-    let library = Library::load(rules, &args.cases)?;
+    let library = Library::load(rules, &args.cases)?.with_source_sections(&args.rules);
     eprintln!(
         "loaded {} cases: {}",
         library.cases.len(),
@@ -982,6 +982,8 @@ fn build_overlay_state(
 /// generated cases in `--cases` with the same id are skipped.
 struct Library {
     cases: Vec<RuleSet>,
+    /// Headings of the source document, to name each setup's section.
+    sections: SourceSections,
 }
 
 impl Library {
@@ -1009,7 +1011,46 @@ impl Library {
                 folder.display()
             );
         }
-        Ok(Self { cases })
+        Ok(Self {
+            cases,
+            sections: SourceSections::default(),
+        })
+    }
+
+    /// Reads the source document's headings. The rules cite it by file name;
+    /// it sits in the repository root, the parent of the rules' `data/`.
+    /// Without it, setups are shown without their section.
+    fn with_source_sections(mut self, rules_path: &Path) -> Self {
+        let Some(document) = self.cases.first().map(|rules| &rules.case.source.document) else {
+            return self;
+        };
+        let path = rules_path
+            .parent()
+            .and_then(Path::parent)
+            .unwrap_or(Path::new("."))
+            .join(document);
+        match SourceSections::load(&path) {
+            Ok(sections) => self.sections = sections,
+            Err(error) => eprintln!(
+                "warning: {}: {error}; setups are shown without their source section",
+                path.display()
+            ),
+        }
+        self
+    }
+
+    /// ` · Odd JL, with T › TIJZ/TILS (mirrored)` for a setup, or empty.
+    fn source_label(&self, setup: &pc_overlay_core::rules::SetupRule) -> String {
+        let Some(section) = self.sections.section(setup.source.lines[0]) else {
+            return String::new();
+        };
+        // Generated cases mirror the source's case with an `_m` id.
+        let mirrored = if setup.id.ends_with("_m") {
+            " (mirrored)"
+        } else {
+            ""
+        };
+        format!(" · {section}{mirrored}")
     }
 
     fn case_ids(&self) -> String {
@@ -1108,15 +1149,20 @@ fn render_stage(
             if !tracker.guidance().show_solve {
                 return (
                     format!(
-                        "PC Overlay: {case} setup complete ({}); press S to show the solve",
-                        setup.id
+                        "PC Overlay: {case} setup complete ({}{}); press S to show the solve",
+                        setup.id,
+                        library.source_label(setup)
                     ),
                     Vec::new(),
                 );
             }
             let plan = pc_overlay_core::OverlayPlan::from_progress(&progress);
             return (
-                format!("PC Overlay: {case} solve active ({})", solve.id),
+                format!(
+                    "PC Overlay: {case} solve active ({}{})",
+                    solve.id,
+                    library.source_label(setup)
+                ),
                 plan_cells(plan, snapshot.observation.current),
             );
         }
@@ -1128,11 +1174,16 @@ fn render_stage(
     let plan = pc_overlay_core::OverlayPlan::from_progress(&progress);
     let cells = plan_cells(plan, snapshot.observation.current);
     let status = if setup.review_status == pc_overlay_core::rules::ReviewStatus::Verified {
-        format!("PC Overlay: {case} guidance active ({})", setup.id)
+        format!(
+            "PC Overlay: {case} guidance active ({}{})",
+            setup.id,
+            library.source_label(setup)
+        )
     } else {
         format!(
-            "PC Overlay: {case} reference guidance active ({}, unreviewed)",
-            setup.id
+            "PC Overlay: {case} reference guidance active ({}, unreviewed{})",
+            setup.id,
+            library.source_label(setup)
         )
     };
     (status, cells)
@@ -1486,6 +1537,7 @@ mod tests {
     fn ijlo_rules() -> Library {
         Library {
             cases: vec![ijlo_only()],
+            sections: SourceSections::default(),
         }
     }
 
@@ -2082,5 +2134,29 @@ mod tests {
         }
         // Current and NEXT alone miss some of them, as before the fix.
         assert!(checked > 0);
+    }
+
+    #[test]
+    fn setups_name_their_section_of_the_source_document() {
+        let library = Library::load(ijlo_only(), &root().join("data/cases"))
+            .unwrap()
+            .with_source_sections(&root().join("data/ijlo.json"));
+        let setup = |id: &str| {
+            library
+                .cases
+                .iter()
+                .flat_map(|rules| &rules.methods)
+                .flat_map(|method| &method.setups)
+                .find(|setup| setup.id == id)
+                .unwrap()
+        };
+        assert_eq!(
+            library.source_label(setup("tils_image434_m")),
+            " · Odd JL, with T › TIJZ/TILS (mirrored)"
+        );
+        assert_eq!(
+            library.source_label(setup("ijlo_s_queue")),
+            " · Even JL, no T › IJLO"
+        );
     }
 }
