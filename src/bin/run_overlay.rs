@@ -10,8 +10,8 @@ use std::{
 use pc_overlay_core::{
     BoardCalibration, CommitOutcome, DiagramSet, FrameSize, OverlayBoard, OverlayCell,
     OverlayCellKind, OverlayState, OverlayWindow, Piece, RecognizerConfig, RuleSet, SessionTracker,
-    SolveProgress, StabilityConfig, StabilityFilter, TetrioRecognizer, TrackerConfig, WindowInfo,
-    WindowLocator, board_is_empty,
+    SolveProgress, SourceSections, StabilityConfig, StabilityFilter, TetrioRecognizer,
+    TrackerConfig, WindowInfo, WindowLocator, board_is_empty,
     finder::{Buildable, Finder},
     konbini,
     konbini::{BuildQuery, FoundSolve, KonbiniLibrary, KonbiniProgress},
@@ -57,7 +57,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             eprintln!("warning: {issue}");
         }
     }
-    let library = Library::load(rules, &args.cases)?;
+    let library = Library::load(rules, &args.cases)?.with_source_sections(&args.rules);
     eprintln!(
         "loaded {} cases: {}",
         library.cases.len(),
@@ -641,7 +641,12 @@ impl KonbiniGuide {
             // A built setup, or a board no setup explains (the player went
             // their own way): search the perfect clears from here.
             self.searched = Some(observation.clone());
-            let solves = konbini::find_perfect_clears(&mut self.finder, observation, SOLVE_LIMIT);
+            let solves = konbini::find_perfect_clears(
+                &mut self.finder,
+                observation,
+                current_index(tracker, snapshot),
+                SOLVE_LIMIT,
+            );
             if !solves.is_empty() {
                 self.solve = Some(SolveSession { solves, index: 0 });
                 if let Some(guide) = solve_guide(&mut self.solve, snapshot, show) {
@@ -742,6 +747,19 @@ fn pc_pieces(
         .into_iter()
         .chain(snapshot.observed_queue_history.iter().copied())
         .collect()
+}
+
+/// Pieces dealt before Current since the game start, for the 7-bag. A
+/// perfect-clear loop deals 10 pieces per PC; the PC's pieces since then
+/// (HOLD at its start, then the queue) end with Current and NEXT5. Wrong
+/// after a resync in the middle of a PC, where the tracker misses the start;
+/// `bag_options` then usually sees a duplicate in a bag and assumes nothing.
+fn current_index(
+    tracker: &SessionTracker,
+    snapshot: &pc_overlay_core::tracker::Snapshot,
+) -> Option<usize> {
+    let before = 10 * usize::from(snapshot.pc_ordinal.get() - 1);
+    (before + pc_pieces(tracker, snapshot).len()).checked_sub(6)
 }
 
 /// The setups of the snapshot's PC that match the board and can be built
@@ -964,6 +982,8 @@ fn build_overlay_state(
 /// generated cases in `--cases` with the same id are skipped.
 struct Library {
     cases: Vec<RuleSet>,
+    /// Headings of the source document, to name each setup's section.
+    sections: SourceSections,
 }
 
 impl Library {
@@ -991,7 +1011,46 @@ impl Library {
                 folder.display()
             );
         }
-        Ok(Self { cases })
+        Ok(Self {
+            cases,
+            sections: SourceSections::default(),
+        })
+    }
+
+    /// Reads the source document's headings. The rules cite it by file name;
+    /// it sits in the repository root, the parent of the rules' `data/`.
+    /// Without it, setups are shown without their section.
+    fn with_source_sections(mut self, rules_path: &Path) -> Self {
+        let Some(document) = self.cases.first().map(|rules| &rules.case.source.document) else {
+            return self;
+        };
+        let path = rules_path
+            .parent()
+            .and_then(Path::parent)
+            .unwrap_or(Path::new("."))
+            .join(document);
+        match SourceSections::load(&path) {
+            Ok(sections) => self.sections = sections,
+            Err(error) => eprintln!(
+                "warning: {}: {error}; setups are shown without their source section",
+                path.display()
+            ),
+        }
+        self
+    }
+
+    /// ` · Odd JL, with T › TIJZ/TILS (mirrored)` for a setup, or empty.
+    fn source_label(&self, setup: &pc_overlay_core::rules::SetupRule) -> String {
+        let Some(section) = self.sections.section(setup.source.lines[0]) else {
+            return String::new();
+        };
+        // Generated cases mirror the source's case with an `_m` id.
+        let mirrored = if setup.id.ends_with("_m") {
+            " (mirrored)"
+        } else {
+            ""
+        };
+        format!(" · {section}{mirrored}")
     }
 
     fn case_ids(&self) -> String {
@@ -1090,15 +1149,20 @@ fn render_stage(
             if !tracker.guidance().show_solve {
                 return (
                     format!(
-                        "PC Overlay: {case} setup complete ({}); press S to show the solve",
-                        setup.id
+                        "PC Overlay: {case} setup complete ({}{}); press S to show the solve",
+                        setup.id,
+                        library.source_label(setup)
                     ),
                     Vec::new(),
                 );
             }
             let plan = pc_overlay_core::OverlayPlan::from_progress(&progress);
             return (
-                format!("PC Overlay: {case} solve active ({})", solve.id),
+                format!(
+                    "PC Overlay: {case} solve active ({}{})",
+                    solve.id,
+                    library.source_label(setup)
+                ),
                 plan_cells(plan, snapshot.observation.current),
             );
         }
@@ -1110,11 +1174,16 @@ fn render_stage(
     let plan = pc_overlay_core::OverlayPlan::from_progress(&progress);
     let cells = plan_cells(plan, snapshot.observation.current);
     let status = if setup.review_status == pc_overlay_core::rules::ReviewStatus::Verified {
-        format!("PC Overlay: {case} guidance active ({})", setup.id)
+        format!(
+            "PC Overlay: {case} guidance active ({}{})",
+            setup.id,
+            library.source_label(setup)
+        )
     } else {
         format!(
-            "PC Overlay: {case} reference guidance active ({}, unreviewed)",
-            setup.id
+            "PC Overlay: {case} reference guidance active ({}, unreviewed{})",
+            setup.id,
+            library.source_label(setup)
         )
     };
     (status, cells)
@@ -1256,6 +1325,7 @@ fn commit_name(commit: &CommitOutcome) -> &'static str {
         CommitOutcome::IgnoredLowConfidence { .. } => "ignored_low_confidence",
         CommitOutcome::RejectedHistoryDiscontinuity => "history_discontinuity",
         CommitOutcome::RolledBack { .. } => "rolled_back",
+        CommitOutcome::NewGame { .. } => "new_game",
     }
 }
 
@@ -1467,6 +1537,7 @@ mod tests {
     fn ijlo_rules() -> Library {
         Library {
             cases: vec![ijlo_only()],
+            sections: SourceSections::default(),
         }
     }
 
@@ -2012,8 +2083,9 @@ mod tests {
             }
         }
         let shown = guide.cells.len();
+        // HOLD stays J: an emptied HOLD would read as a restarted game.
         let mut placed = observation(
-            None,
+            Some(Piece::J),
             Piece::S,
             [Piece::Z, Piece::I, Piece::T, Piece::L, Piece::J],
         );
@@ -2023,5 +2095,68 @@ mod tests {
         let guide = mode.guide(&tracker, &snapshot);
         assert!(guide.status.contains("perfect clear"), "{}", guide.status);
         assert_eq!(guide.cells.len(), shown - 4, "{}", guide.status);
+    }
+
+    #[test]
+    fn a_100_percent_setup_is_solved_with_the_7th_piece_of_the_bag() {
+        let library = konbini_library();
+        let setup = library
+            .setups
+            .iter()
+            .find(|setup| setup.sol_percent == Some(100.0))
+            .unwrap();
+        let mut board = empty_board();
+        for cell in &setup.cells {
+            board[usize::from(cell.cell.y)][usize::from(cell.cell.x)] = cell.piece;
+        }
+        // The 2nd PC's 4 setup pieces end the 2nd bag: Current is index 14.
+        let mut finder = Finder::new();
+        let mut checked = 0;
+        // Each piece last, the rest in a fixed order: 7 orders of the bag.
+        for last in pc_overlay_core::finder::ALL_PIECES {
+            let first: Vec<Piece> = pc_overlay_core::finder::ALL_PIECES
+                .into_iter()
+                .filter(|piece| *piece != last)
+                .collect();
+            let observation = Observation {
+                board,
+                hold: None,
+                current: first[0],
+                next5: first[1..].try_into().unwrap(),
+            };
+            assert!(
+                !konbini::find_perfect_clears(&mut finder, &observation, Some(14), 1).is_empty(),
+                "{first:?} then {last:?}"
+            );
+            if konbini::find_perfect_clears(&mut finder, &observation, None, 1).is_empty() {
+                checked += 1;
+            }
+        }
+        // Current and NEXT alone miss some of them, as before the fix.
+        assert!(checked > 0);
+    }
+
+    #[test]
+    fn setups_name_their_section_of_the_source_document() {
+        let library = Library::load(ijlo_only(), &root().join("data/cases"))
+            .unwrap()
+            .with_source_sections(&root().join("data/ijlo.json"));
+        let setup = |id: &str| {
+            library
+                .cases
+                .iter()
+                .flat_map(|rules| &rules.methods)
+                .flat_map(|method| &method.setups)
+                .find(|setup| setup.id == id)
+                .unwrap()
+        };
+        assert_eq!(
+            library.source_label(setup("tils_image434_m")),
+            " · Odd JL, with T › TIJZ/TILS (mirrored)"
+        );
+        assert_eq!(
+            library.source_label(setup("ijlo_s_queue")),
+            " · Even JL, no T › IJLO"
+        );
     }
 }

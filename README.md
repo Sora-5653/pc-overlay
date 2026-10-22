@@ -40,9 +40,14 @@ This directory now contains the first implementation slice for the specification
   the session tracker can consume it. The three-frame agreement is the primary
   animation/noise guard; the previous 92% threshold rejected normal antialiased
   TETR.IO previews.
-- Windows-only visible-window discovery that filters for `TETR.IO` titles,
-  records the client rectangle and process identity, and chooses the largest
-  qualifying candidate. It does not inspect TETR.IO internals or monitor input.
+- Windows-only visible-window discovery that filters for `TETR.IO` titles
+  owned by the TETR.IO Desktop process (`TETR.IO.exe`), records the client
+  rectangle and process identity, and chooses the largest qualifying
+  candidate. It does not inspect TETR.IO internals or monitor input. Until
+  2026-10-22 the title alone decided, so a browser whose page title
+  contains "TETR.IO" (tetr.io itself, or this repository on GitHub) was
+  captured instead when the game was minimized or smaller; tetr.io in a
+  browser is not supported.
 - A Windows GDI client-area frame source returning validated top-to-bottom RGBA
   frames. `probe-capture --bmp <path>` is an opt-in calibration diagnostic; the
   normal frame path does not write screenshots.
@@ -76,7 +81,12 @@ This directory now contains the first implementation slice for the specification
   complete it draws the remaining cells of a verified solve once the player
   presses `S` or `Ctrl+Alt+S` (OFF at the start of every PC). Unknown states
   never reuse a stale
-  recommendation.
+  recommendation. Since 2026-10-22 setup and solve cells are a light,
+  translucent tint in the piece colour with an outline around each piece
+  (not around every cell); the cells of the current piece are tinted more
+  strongly, and warnings are red. The window uses per-pixel alpha
+  (`UpdateLayeredWindow`), so the falling piece stays visible through the
+  tint. Touching pieces of the same type share one outline.
 
 ## IJLO transcription status
 
@@ -272,6 +282,12 @@ Since 2026-10-21 `run-overlay` shows one guidance without a mode switch
 - The status line names the origin: `PC Overlay [source]: ...` or
   `PC Overlay [Konbini 2nd]: ...`; the detail line ends with
   `guide=source` / `guide=Konbini`.
+- Since 2026-10-22 a source setup also names its section of
+  `Algebruh's 2nd Methods.md`, from the line it cites:
+  `TILS guidance active (tils_image434_m · Odd JL, with T › TIJZ/TILS (mirrored))`.
+  `(mirrored)` marks a generated case that mirrors the section's case. The
+  document is read from the repository root (the parent of the rules'
+  `data/`); without it the section is left out.
 
 Hotkeys (changes from the two-mode version in bold):
 
@@ -381,8 +397,17 @@ The search follows solution-finder's two layers for a perfect clear:
 
 `Finder::perfect_clears` tries the lowest height from the top block up to
 4 rows whose empty cells the pieces can fill; `konbini::find_perfect_clears`
-runs it on the live board with HOLD, Current, and NEXT5 (pieces beyond
-NEXT are not guessed, so a solve needing them is not found). A first
+runs it on the live board with HOLD, Current, NEXT5, and the pieces after
+NEXT that the 7-bag already fixes (`finder::bag_forced`: the rest of a bag
+of which six are known; a fresh bag is not guessed). Before 2026-10-22 it
+stopped at NEXT5, and many 100% setups showed no perfect clear: the
+sheet's `SOL` counts every order of the next bag with all 7 pieces (one
+may stay in HOLD), and after a 2nd-PC setup Current and NEXT show only 6
+of them. `cargo run --release --example konbini_sol_rate` re-measures the
+2nd-PC 100% setups over all 5040 orders: 41-57% with those 6 pieces,
+100.00% with the 7th, so the SRS+ search agrees with the sheet. The
+bag position assumes 10 pieces per earlier PC and is wrong after a resync
+in the middle of a PC (a duplicate in a bag then disables it). A first
 version that searched piece orders directly (DFS over every placement)
 took about 1 s per 7-piece search, as ~100,000 fields needed move
 generation; tiling first cut that to milliseconds.
@@ -600,12 +625,17 @@ whole queue known before the game starts.
 6. Done (2026-10-21): a Rust perfect-clear search after solution-finder
    with SRS+ finds the solves after a Setup Konbini setup, several at once
    (see "Perfect-clear solve search"). Not yet tried in TETR.IO.
-7. TODO (found 2026-10-21): resetting the board with `R` in TETR.IO breaks
-   the PC number. The tracker advances it on every board that empties, and
-   a restarted game cannot be told from a PC by the piece sequence, since
-   the 1st PC usually has no visible bag boundary. Until it is fixed, use
-   `Ctrl+Alt+1..7` after a reset. Planned fix: track key input (the reset
-   key) to restart at PC 1.
+7. Done (2026-10-22): resetting the board with `R` in TETR.IO restarts the
+   PC number at 1 instead of counting a PC. The tracker reads the restart
+   from the screen, not from the reset key (which can be rebound and whose
+   short press a 100 ms poll can miss): once filled, HOLD never empties
+   within a game, so HOLD going from a piece to empty is a new game; before
+   the first hold, a NEXT queue that does not continue the previous one is
+   a new game too (`CommitOutcome::NewGame`, unit-tested in
+   `src/tracker.rs`). Undo is matched first, so Undo back to the empty-HOLD
+   start is still a rollback. Not detected: a restart whose first stable
+   frame already has a piece in HOLD; use `Ctrl+Alt+1` then. Not yet tried
+   in TETR.IO.
 
 `run-overlay` is the user-facing Windows surface. The S/Z queue and save-O setups are verified;
 the sandbox setup is shown as reference guidance, not as a verified

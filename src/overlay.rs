@@ -51,6 +51,177 @@ pub enum OverlayError {
     Win32(&'static str),
 }
 
+/// A 32-bit top-down image in the premultiplied `0xAARRGGBB` layout that
+/// `UpdateLayeredWindow` blends per pixel. Kept free of Win32 so the cell
+/// drawing is testable on any platform.
+struct Canvas<'a> {
+    pixels: &'a mut [u32],
+    width: i32,
+    height: i32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Rgb(u8, u8, u8);
+
+/// Setup cells are a light tint with an opaque outline around each piece, so
+/// the falling piece and the board stay visible through them.
+const MISSING_FILL_ALPHA: u8 = 70;
+/// The cells of the piece to place now are tinted more strongly.
+const CURRENT_FILL_ALPHA: u8 = 125;
+const WARNING_FILL_ALPHA: u8 = 60;
+const OUTLINE_ALPHA: u8 = 235;
+const BOARD_FRAME_ALPHA: u8 = 200;
+
+impl Canvas<'_> {
+    /// Draws `colour` at `alpha` over the half-open rectangle, clipped.
+    fn blend_rect(&mut self, left: i32, top: i32, right: i32, bottom: i32, colour: Rgb, alpha: u8) {
+        let (left, right) = (left.max(0), right.min(self.width));
+        let (top, bottom) = (top.max(0), bottom.min(self.height));
+        for y in top..bottom {
+            let row = (y * self.width) as usize;
+            for pixel in &mut self.pixels[row + left as usize..row + right.max(left) as usize] {
+                *pixel = over(*pixel, colour, alpha);
+            }
+        }
+    }
+
+    fn outline_rect(&mut self, rect: [i32; 4], thickness: i32, colour: Rgb, alpha: u8) {
+        let [left, top, right, bottom] = rect;
+        self.blend_rect(left, top, right, top + thickness, colour, alpha);
+        self.blend_rect(left, bottom - thickness, right, bottom, colour, alpha);
+        self.blend_rect(
+            left,
+            top + thickness,
+            left + thickness,
+            bottom - thickness,
+            colour,
+            alpha,
+        );
+        self.blend_rect(
+            right - thickness,
+            top + thickness,
+            right,
+            bottom - thickness,
+            colour,
+            alpha,
+        );
+    }
+
+    /// Opaque alpha for pixels GDI drew text into. GDI leaves alpha at 0, which
+    /// a per-pixel-alpha window would show as invisible.
+    fn make_drawn_pixels_opaque(&mut self) {
+        for pixel in self.pixels.iter_mut() {
+            if *pixel >> 24 == 0 && *pixel & 0x00FF_FFFF != 0 {
+                *pixel |= 0xFF00_0000;
+            }
+        }
+    }
+
+    fn draw_board(&mut self, board: OverlayBoard, cells: &[OverlayCell]) {
+        let rect = board.rect;
+        self.outline_rect(
+            [
+                rect.left as i32,
+                rect.top as i32,
+                rect.left.saturating_add(rect.width) as i32,
+                rect.top.saturating_add(rect.height) as i32,
+            ],
+            1,
+            Rgb(90, 190, 255),
+            BOARD_FRAME_ALPHA,
+        );
+
+        // Neighbouring cells of the same piece and kind share one outline, so
+        // a setup reads as pieces rather than a grid. Two touching pieces of
+        // the same type merge, as the cells carry no placement identity.
+        let mut groups = [[None; 10]; 20];
+        for overlay_cell in cells.iter().filter(|cell| cell.cell.in_bounds()) {
+            groups[usize::from(overlay_cell.cell.y)][usize::from(overlay_cell.cell.x)] =
+                Some((overlay_cell.piece, overlay_cell.kind));
+        }
+        let same_group = |x: i32, y: i32, group| {
+            (0..10).contains(&x)
+                && (0..20).contains(&y)
+                && groups[y as usize][x as usize] == Some(group)
+        };
+
+        let cell_width = rect.width as f32 / 10.0;
+        let cell_height = rect.height as f32 / 20.0;
+        let thickness = if cell_width.min(cell_height) >= 16.0 {
+            2
+        } else {
+            1
+        };
+        for overlay_cell in cells.iter().filter(|cell| cell.cell.in_bounds()) {
+            let (x, y) = (
+                i32::from(overlay_cell.cell.x),
+                i32::from(overlay_cell.cell.y),
+            );
+            let image_row = 19 - y;
+            let left = (rect.left as f32 + x as f32 * cell_width).round() as i32;
+            let right = (rect.left as f32 + (x + 1) as f32 * cell_width).round() as i32;
+            let top = (rect.top as f32 + image_row as f32 * cell_height).round() as i32;
+            let bottom = (rect.top as f32 + (image_row + 1) as f32 * cell_height).round() as i32;
+            let (colour, fill_alpha) = match overlay_cell.kind {
+                OverlayCellKind::Warning | OverlayCellKind::Unexpected => {
+                    (Rgb(255, 80, 80), WARNING_FILL_ALPHA)
+                }
+                OverlayCellKind::Missing => (cell_colour(overlay_cell.piece), MISSING_FILL_ALPHA),
+                OverlayCellKind::Current => (cell_colour(overlay_cell.piece), CURRENT_FILL_ALPHA),
+            };
+            self.blend_rect(left, top, right, bottom, colour, fill_alpha);
+
+            let group = (overlay_cell.piece, overlay_cell.kind);
+            // Board y grows upwards, image rows downwards.
+            if !same_group(x, y + 1, group) {
+                self.blend_rect(left, top, right, top + thickness, colour, OUTLINE_ALPHA);
+            }
+            if !same_group(x, y - 1, group) {
+                self.blend_rect(
+                    left,
+                    bottom - thickness,
+                    right,
+                    bottom,
+                    colour,
+                    OUTLINE_ALPHA,
+                );
+            }
+            if !same_group(x - 1, y, group) {
+                self.blend_rect(left, top, left + thickness, bottom, colour, OUTLINE_ALPHA);
+            }
+            if !same_group(x + 1, y, group) {
+                self.blend_rect(right - thickness, top, right, bottom, colour, OUTLINE_ALPHA);
+            }
+        }
+    }
+}
+
+/// Porter-Duff "over" of a straight colour onto a premultiplied pixel.
+fn over(destination: u32, colour: Rgb, alpha: u8) -> u32 {
+    let alpha = u32::from(alpha);
+    let inverse = 255 - alpha;
+    let channel = |source: u8, shift: u32| {
+        let below = (destination >> shift) & 0xFF;
+        ((u32::from(source) * alpha + below * inverse + 127) / 255) << shift
+    };
+    let below_alpha = destination >> 24;
+    let out_alpha = alpha + (below_alpha * inverse + 127) / 255;
+    (out_alpha << 24) | channel(colour.0, 16) | channel(colour.1, 8) | channel(colour.2, 0)
+}
+
+fn cell_colour(piece: Option<Piece>) -> Rgb {
+    match piece {
+        Some(Piece::I) => Rgb(50, 210, 170),
+        Some(Piece::J) => Rgb(100, 120, 240),
+        Some(Piece::L) => Rgb(240, 150, 80),
+        Some(Piece::O) => Rgb(240, 210, 70),
+        Some(Piece::S) => Rgb(150, 220, 80),
+        Some(Piece::T) => Rgb(150, 100, 250),
+        Some(Piece::Z) => Rgb(240, 90, 100),
+        None => Rgb(100, 210, 255),
+    }
+}
+
 #[cfg(not(windows))]
 #[derive(Debug, Default)]
 pub struct OverlayWindow;
@@ -76,31 +247,26 @@ impl OverlayWindow {
 
 #[cfg(windows)]
 mod win32 {
-    use std::sync::{Mutex, OnceLock};
-
     use super::*;
     use windows_sys::Win32::{
-        Foundation::{
-            COLORREF, ERROR_CLASS_ALREADY_EXISTS, GetLastError, HWND, LPARAM, RECT, WPARAM,
-        },
+        Foundation::{ERROR_CLASS_ALREADY_EXISTS, GetLastError, HWND, LPARAM, POINT, SIZE, WPARAM},
         Graphics::Gdi::{
-            BLACK_BRUSH, BeginPaint, CreateSolidBrush, DEFAULT_GUI_FONT, DeleteObject, EndPaint,
-            FillRect, FrameRect, GetStockObject, HGDIOBJ, InvalidateRect, PAINTSTRUCT,
-            SelectObject, SetBkMode, SetTextColor, TRANSPARENT, TextOutW,
+            AC_SRC_ALPHA, AC_SRC_OVER, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLACK_BRUSH,
+            BLENDFUNCTION, BeginPaint, CreateCompatibleDC, CreateDIBSection, DEFAULT_GUI_FONT,
+            DIB_RGB_COLORS, DeleteDC, DeleteObject, EndPaint, GdiFlush, GetDC, GetStockObject, HDC,
+            PAINTSTRUCT, ReleaseDC, SelectObject, SetBkMode, SetTextColor, TRANSPARENT, TextOutW,
         },
         System::LibraryLoader::GetModuleHandleW,
         UI::WindowsAndMessaging::{
-            CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect,
-            HTTRANSPARENT, HWND_TOPMOST, LWA_ALPHA, LWA_COLORKEY, MA_NOACTIVATE, PM_REMOVE,
-            PeekMessageW, RegisterClassW, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE,
-            SetLayeredWindowAttributes, SetWindowPos, ShowWindow, TranslateMessage, WM_DESTROY,
-            WM_ERASEBKGND, WM_MOUSEACTIVATE, WM_NCHITTEST, WM_PAINT, WM_QUIT, WNDCLASSW,
-            WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT,
-            WS_POPUP,
+            CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, HTTRANSPARENT,
+            HWND_TOPMOST, MA_NOACTIVATE, PM_REMOVE, PeekMessageW, RegisterClassW, SW_HIDE,
+            SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SetWindowPos, ShowWindow, TranslateMessage,
+            ULW_ALPHA, UpdateLayeredWindow, WM_DESTROY, WM_ERASEBKGND, WM_MOUSEACTIVATE,
+            WM_NCHITTEST, WM_PAINT, WM_QUIT, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+            WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
         },
     };
 
-    static STATE: OnceLock<Mutex<OverlayState>> = OnceLock::new();
     const CLASS_NAME: &[u16] = &[
         'P' as u16, 'c' as u16, 'O' as u16, 'v' as u16, 'e' as u16, 'r' as u16, 'l' as u16,
         'a' as u16, 'y' as u16, 'W' as u16, 'i' as u16, 'n' as u16, 'd' as u16, 'o' as u16,
@@ -114,7 +280,6 @@ mod win32 {
 
     impl OverlayWindow {
         pub fn new() -> Result<Self, OverlayError> {
-            STATE.get_or_init(|| Mutex::new(OverlayState::default()));
             unsafe {
                 let instance = GetModuleHandleW(std::ptr::null());
                 if instance.is_null() {
@@ -133,6 +298,8 @@ mod win32 {
                         return Err(OverlayError::Win32("RegisterClassW"));
                     }
                 }
+                // Per-pixel alpha comes from UpdateLayeredWindow in `update`,
+                // so the window is shown only once it has content.
                 let hwnd = CreateWindowExW(
                     WS_EX_LAYERED
                         | WS_EX_TRANSPARENT
@@ -154,11 +321,6 @@ mod win32 {
                 if hwnd.is_null() {
                     return Err(OverlayError::Win32("CreateWindowExW"));
                 }
-                if SetLayeredWindowAttributes(hwnd, 0, 210, LWA_COLORKEY | LWA_ALPHA) == 0 {
-                    DestroyWindow(hwnd);
-                    return Err(OverlayError::Win32("SetLayeredWindowAttributes"));
-                }
-                ShowWindow(hwnd, SW_SHOWNOACTIVATE);
                 Ok(Self {
                     hwnd,
                     closed: false,
@@ -174,41 +336,126 @@ mod win32 {
             if self.closed {
                 return Ok(());
             }
-            if let Some(mutex) = STATE.get() {
-                let mut current = mutex
-                    .lock()
-                    .map_err(|_| OverlayError::Win32("overlay state lock"))?;
-                *current = state;
+            let Some(client) = client else {
+                unsafe { ShowWindow(self.hwnd, SW_HIDE) };
+                return Ok(());
+            };
+            let width = i32::try_from(client.width)
+                .map_err(|_| OverlayError::Win32("client width overflow"))?;
+            let height = i32::try_from(client.height)
+                .map_err(|_| OverlayError::Win32("client height overflow"))?;
+            if width <= 0 || height <= 0 {
+                unsafe { ShowWindow(self.hwnd, SW_HIDE) };
+                return Ok(());
             }
             unsafe {
-                if let Some(client) = client {
-                    let width = i32::try_from(client.width)
-                        .map_err(|_| OverlayError::Win32("client width overflow"))?;
-                    let height = i32::try_from(client.height)
-                        .map_err(|_| OverlayError::Win32("client height overflow"))?;
-                    if width <= 0 || height <= 0 {
-                        ShowWindow(self.hwnd, SW_HIDE);
-                    } else {
-                        if SetWindowPos(
-                            self.hwnd,
-                            HWND_TOPMOST,
-                            client.left,
-                            client.top,
-                            width,
-                            height,
-                            SWP_NOACTIVATE,
-                        ) == 0
-                        {
-                            return Err(OverlayError::Win32("SetWindowPos"));
-                        }
-                        ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
-                    }
-                } else {
-                    ShowWindow(self.hwnd, SW_HIDE);
+                if SetWindowPos(
+                    self.hwnd,
+                    HWND_TOPMOST,
+                    client.left,
+                    client.top,
+                    width,
+                    height,
+                    SWP_NOACTIVATE,
+                ) == 0
+                {
+                    return Err(OverlayError::Win32("SetWindowPos"));
                 }
-                InvalidateRect(self.hwnd, std::ptr::null(), 0);
+                self.render(client.left, client.top, width, height, &state)?;
+                ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
             }
             Ok(())
+        }
+
+        /// Draws the state into a fresh premultiplied DIB and hands it to the
+        /// layered window. Transparent pixels show the game unchanged.
+        unsafe fn render(
+            &self,
+            left: i32,
+            top: i32,
+            width: i32,
+            height: i32,
+            state: &OverlayState,
+        ) -> Result<(), OverlayError> {
+            unsafe {
+                let screen = GetDC(std::ptr::null_mut());
+                if screen.is_null() {
+                    return Err(OverlayError::Win32("GetDC"));
+                }
+                let memory = CreateCompatibleDC(screen);
+                if memory.is_null() {
+                    ReleaseDC(std::ptr::null_mut(), screen);
+                    return Err(OverlayError::Win32("CreateCompatibleDC"));
+                }
+                let info = BITMAPINFO {
+                    bmiHeader: BITMAPINFOHEADER {
+                        biSize: size_of::<BITMAPINFOHEADER>() as u32,
+                        biWidth: width,
+                        // Negative: rows run top-down, as the canvas expects.
+                        biHeight: -height,
+                        biPlanes: 1,
+                        biBitCount: 32,
+                        biCompression: BI_RGB,
+                        ..BITMAPINFOHEADER::default()
+                    },
+                    ..BITMAPINFO::default()
+                };
+                let mut bits = std::ptr::null_mut();
+                let bitmap = CreateDIBSection(
+                    memory,
+                    &info,
+                    DIB_RGB_COLORS,
+                    &mut bits,
+                    std::ptr::null_mut(),
+                    0,
+                );
+                let result = if bitmap.is_null() || bits.is_null() {
+                    Err(OverlayError::Win32("CreateDIBSection"))
+                } else {
+                    let old_bitmap = SelectObject(memory, bitmap);
+                    let pixels = std::slice::from_raw_parts_mut(
+                        bits.cast::<u32>(),
+                        width as usize * height as usize,
+                    );
+                    pixels.fill(0);
+                    draw_status(memory, state);
+                    GdiFlush();
+                    let mut canvas = Canvas {
+                        pixels,
+                        width,
+                        height,
+                    };
+                    canvas.make_drawn_pixels_opaque();
+                    if let Some(board) = state.board {
+                        canvas.draw_board(board, &state.cells);
+                    }
+                    let blend = BLENDFUNCTION {
+                        BlendOp: AC_SRC_OVER as u8,
+                        BlendFlags: 0,
+                        SourceConstantAlpha: 255,
+                        AlphaFormat: AC_SRC_ALPHA as u8,
+                    };
+                    let position = POINT { x: left, y: top };
+                    let size = SIZE {
+                        cx: width,
+                        cy: height,
+                    };
+                    let source = POINT { x: 0, y: 0 };
+                    let updated = UpdateLayeredWindow(
+                        self.hwnd, screen, &position, &size, memory, &source, 0, &blend, ULW_ALPHA,
+                    );
+                    SelectObject(memory, old_bitmap);
+                    DeleteObject(bitmap);
+                    if updated == 0 {
+                        Err(OverlayError::Win32("UpdateLayeredWindow"))
+                    } else {
+                        Ok(())
+                    }
+                };
+                DeleteDC(memory);
+                ReleaseDC(std::ptr::null_mut(), screen);
+                result
+            }
         }
 
         pub fn pump(&mut self) -> bool {
@@ -249,10 +496,10 @@ mod win32 {
     ) -> isize {
         unsafe {
             match message {
+                // Content comes from UpdateLayeredWindow; only validate.
                 WM_PAINT => {
                     let mut paint = PAINTSTRUCT::default();
-                    let hdc = BeginPaint(hwnd, &mut paint);
-                    paint_window(hdc, hwnd);
+                    BeginPaint(hwnd, &mut paint);
                     EndPaint(hwnd, &paint);
                     0
                 }
@@ -265,125 +512,117 @@ mod win32 {
         }
     }
 
-    unsafe fn paint_window(hdc: HGDIOBJ, hwnd: HWND) {
+    unsafe fn draw_status(hdc: HDC, state: &OverlayState) {
         unsafe {
-            let mut client = RECT::default();
-            GetClientRect(hwnd, &mut client);
-            let black = CreateSolidBrush(rgb(0, 0, 0));
-            if !black.is_null() {
-                FillRect(hdc, &client, black);
-                DeleteObject(black as _);
-            }
-
-            let Some(mutex) = STATE.get() else {
-                return;
-            };
-            let Ok(state) = mutex.lock() else {
-                return;
-            };
             let font = GetStockObject(DEFAULT_GUI_FONT);
             let old_font = SelectObject(hdc, font);
             SetBkMode(hdc, TRANSPARENT as i32);
-            SetTextColor(hdc, rgb(240, 240, 240));
+            SetTextColor(hdc, colorref(Rgb(240, 240, 240)));
             draw_text(hdc, 12, 10, &state.status);
-            SetTextColor(hdc, rgb(190, 190, 190));
+            SetTextColor(hdc, colorref(Rgb(190, 190, 190)));
             draw_text(hdc, 12, 28, &state.detail);
-
-            if let Some(board) = state.board {
-                draw_board_frame(hdc, board.rect);
-                draw_cells(hdc, board, &state.cells);
-            }
             SelectObject(hdc, old_font);
         }
     }
 
-    unsafe fn draw_text(hdc: HGDIOBJ, x: i32, y: i32, text: &str) {
-        let mut wide: Vec<u16> = text.encode_utf16().collect();
+    unsafe fn draw_text(hdc: HDC, x: i32, y: i32, text: &str) {
+        let wide: Vec<u16> = text.encode_utf16().collect();
         if wide.is_empty() {
             return;
         }
         unsafe {
-            TextOutW(hdc, x, y, wide.as_mut_ptr(), wide.len() as i32);
+            TextOutW(hdc, x, y, wide.as_ptr(), wide.len() as i32);
         }
     }
 
-    unsafe fn draw_cells(hdc: HGDIOBJ, board: OverlayBoard, cells: &[OverlayCell]) {
-        unsafe {
-            let cell_width = board.rect.width as f32 / 10.0;
-            let cell_height = board.rect.height as f32 / 20.0;
-            for overlay_cell in cells {
-                if !overlay_cell.cell.in_bounds() {
-                    continue;
-                }
-                let image_row = 19 - usize::from(overlay_cell.cell.y);
-                let left = board.rect.left as f32 + f32::from(overlay_cell.cell.x) * cell_width;
-                let top = board.rect.top as f32 + image_row as f32 * cell_height;
-                let right = left + cell_width;
-                let bottom = top + cell_height;
-                let outer = RECT {
-                    left: left.round() as i32,
-                    top: top.round() as i32,
-                    right: right.round() as i32,
-                    bottom: bottom.round() as i32,
-                };
-                let colour = match overlay_cell.kind {
-                    OverlayCellKind::Warning | OverlayCellKind::Unexpected => rgb(255, 80, 80),
-                    OverlayCellKind::Missing | OverlayCellKind::Current => overlay_cell
-                        .piece
-                        .map(piece_colour)
-                        .unwrap_or(rgb(100, 210, 255)),
-                };
-                let brush = CreateSolidBrush(colour);
-                if brush.is_null() {
-                    continue;
-                }
-                match overlay_cell.kind {
-                    OverlayCellKind::Current => {
-                        FillRect(hdc, &outer, brush);
-                    }
-                    OverlayCellKind::Missing
-                    | OverlayCellKind::Warning
-                    | OverlayCellKind::Unexpected => {
-                        FrameRect(hdc, &outer, brush);
-                    }
-                }
-                DeleteObject(brush as _);
-            }
-        }
-    }
-
-    unsafe fn draw_board_frame(hdc: HGDIOBJ, board: PixelRect) {
-        unsafe {
-            let rect = RECT {
-                left: board.left as i32,
-                top: board.top as i32,
-                right: board.left.saturating_add(board.width) as i32,
-                bottom: board.top.saturating_add(board.height) as i32,
-            };
-            let brush = CreateSolidBrush(rgb(90, 190, 255));
-            if !brush.is_null() {
-                FrameRect(hdc, &rect, brush);
-                DeleteObject(brush as _);
-            }
-        }
-    }
-
-    fn rgb(red: u8, green: u8, blue: u8) -> COLORREF {
-        u32::from(red) | (u32::from(green) << 8) | (u32::from(blue) << 16)
-    }
-
-    fn piece_colour(piece: Piece) -> COLORREF {
-        match piece {
-            Piece::I => rgb(50, 210, 170),
-            Piece::J => rgb(100, 120, 240),
-            Piece::L => rgb(240, 150, 80),
-            Piece::O => rgb(240, 210, 70),
-            Piece::S => rgb(150, 220, 80),
-            Piece::T => rgb(150, 100, 250),
-            Piece::Z => rgb(240, 90, 100),
-        }
+    fn colorref(colour: Rgb) -> u32 {
+        u32::from(colour.0) | (u32::from(colour.1) << 8) | (u32::from(colour.2) << 16)
     }
 }
 
 #[cfg(windows)]
 pub use win32::OverlayWindow;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A 10x20 board of 20 px cells at the canvas origin.
+    fn board() -> OverlayBoard {
+        OverlayBoard {
+            frame: FrameSize {
+                width: 200,
+                height: 400,
+            },
+            rect: PixelRect {
+                left: 0,
+                top: 0,
+                width: 200,
+                height: 400,
+            },
+        }
+    }
+
+    fn missing(x: u8, y: u8, piece: Piece) -> OverlayCell {
+        OverlayCell {
+            cell: Cell { x, y },
+            piece: Some(piece),
+            kind: OverlayCellKind::Missing,
+        }
+    }
+
+    fn draw(cells: &[OverlayCell]) -> Vec<u32> {
+        let mut pixels = vec![0; 200 * 400];
+        Canvas {
+            pixels: &mut pixels,
+            width: 200,
+            height: 400,
+        }
+        .draw_board(board(), cells);
+        pixels
+    }
+
+    fn alpha(pixels: &[u32], x: usize, y: usize) -> u32 {
+        pixels[y * 200 + x] >> 24
+    }
+
+    #[test]
+    fn setup_cells_are_a_light_tint_outlined_around_the_piece_only() {
+        // Two horizontally adjacent O cells on the bottom row (image y 380..400).
+        let pixels = draw(&[missing(3, 0, Piece::O), missing(4, 0, Piece::O)]);
+        assert_eq!(alpha(&pixels, 70, 390), u32::from(MISSING_FILL_ALPHA));
+        assert!(
+            alpha(&pixels, 60, 390) >= u32::from(OUTLINE_ALPHA),
+            "outer left edge"
+        );
+        assert!(
+            alpha(&pixels, 70, 380) >= u32::from(OUTLINE_ALPHA),
+            "outer top edge"
+        );
+        // The shared edge at x = 80 is not outlined, so no grid line splits the piece.
+        assert_eq!(alpha(&pixels, 79, 390), u32::from(MISSING_FILL_ALPHA));
+        assert_eq!(alpha(&pixels, 80, 390), u32::from(MISSING_FILL_ALPHA));
+        // Outside the cells and the board frame stays fully transparent.
+        assert_eq!(alpha(&pixels, 120, 390), 0);
+    }
+
+    #[test]
+    fn different_pieces_keep_their_own_outlines_and_current_is_stronger() {
+        let mut current = missing(4, 0, Piece::T);
+        current.kind = OverlayCellKind::Current;
+        let pixels = draw(&[missing(3, 0, Piece::O), current]);
+        assert!(alpha(&pixels, 79, 390) >= u32::from(OUTLINE_ALPHA));
+        assert!(alpha(&pixels, 80, 390) >= u32::from(OUTLINE_ALPHA));
+        assert_eq!(alpha(&pixels, 90, 390), u32::from(CURRENT_FILL_ALPHA));
+    }
+
+    #[test]
+    fn over_keeps_premultiplied_channels_within_alpha() {
+        let once = over(0, Rgb(240, 210, 70), 70);
+        let twice = over(once, Rgb(240, 210, 70), 235);
+        for pixel in [once, twice] {
+            let alpha = pixel >> 24;
+            assert!((0..3).all(|channel| (pixel >> (channel * 8)) & 0xFF <= alpha));
+        }
+    }
+}
