@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "Rule evaluation and session tracking core for a TETR.IO 2nd PC learning overlay"
 license = "MIT"
+default-run = "run-overlay"
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
