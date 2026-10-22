@@ -52,11 +52,22 @@ pub struct Snapshot {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum CommitOutcome {
-    Accepted { snapshot: Snapshot },
+    Accepted {
+        snapshot: Snapshot,
+    },
     Unchanged,
-    IgnoredLowConfidence { confidence: f32 },
+    IgnoredLowConfidence {
+        confidence: f32,
+    },
     RejectedHistoryDiscontinuity,
-    RolledBack { steps: usize, snapshot: Snapshot },
+    RolledBack {
+        steps: usize,
+        snapshot: Snapshot,
+    },
+    /// The game was restarted; the tracker is back at PC 1 with no history.
+    NewGame {
+        snapshot: Snapshot,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -207,6 +218,20 @@ impl SessionTracker {
             };
         }
 
+        if self
+            .history
+            .last()
+            .is_some_and(|last| starts_new_game(&last.observation, &observation))
+        {
+            // Undo never crosses a restart, so the old game's states are gone.
+            self.pc_ordinal = PcOrdinal::default();
+            self.observed_queue_history = seed_queue(&observation);
+            self.guidance = GuidanceState::default();
+            self.history.clear();
+            let snapshot = self.push_snapshot(observation, recognition_confidence, timestamp_ms);
+            return CommitOutcome::NewGame { snapshot };
+        }
+
         let crossed_pc_boundary = self.history.last().is_some_and(|last| {
             !board_is_empty(&last.observation.board) && board_is_empty(&observation.board)
         });
@@ -228,6 +253,16 @@ impl SessionTracker {
             self.observed_queue_history = seed_queue(&observation);
         }
 
+        let snapshot = self.push_snapshot(observation, recognition_confidence, timestamp_ms);
+        CommitOutcome::Accepted { snapshot }
+    }
+
+    fn push_snapshot(
+        &mut self,
+        observation: Observation,
+        recognition_confidence: f32,
+        timestamp_ms: u64,
+    ) -> Snapshot {
         let snapshot = Snapshot {
             timestamp_ms,
             pc_ordinal: self.pc_ordinal,
@@ -237,8 +272,20 @@ impl SessionTracker {
             recognition_confidence,
         };
         self.history.push(snapshot.clone());
-        CommitOutcome::Accepted { snapshot }
+        snapshot
     }
+}
+
+/// A restarted game (`R` in ZEN) is told from a PC by HOLD, not by the board:
+/// once filled, HOLD never empties within a game, while a restart empties it.
+/// Before the first hold, a NEXT queue that does not continue the previous
+/// one is a restart too; such a state is in PC 1, so a false positive from
+/// skipped frames there costs nothing. Undo to an earlier state of the same
+/// game is matched by the rollback before this check.
+fn starts_new_game(previous: &Observation, observation: &Observation) -> bool {
+    observation.hold.is_none()
+        && (previous.hold.is_some()
+            || append_revealed(&[], &previous.next5, &observation.next5).is_none())
 }
 
 fn seed_queue(observation: &Observation) -> Vec<Piece> {
@@ -469,6 +516,94 @@ mod tests {
             !tracker.guidance().show_solve,
             "turned OFF by a manual resync"
         );
+    }
+
+    #[test]
+    fn emptied_hold_restarts_at_pc_one_instead_of_counting_a_pc() {
+        let mut tracker = tracker();
+        tracker.resync(PcOrdinal::new(3).unwrap());
+        tracker.commit(
+            observation(
+                true,
+                Piece::I,
+                [Piece::J, Piece::L, Piece::O, Piece::S, Piece::T],
+            ),
+            1.0,
+            1,
+        );
+        // R in ZEN: an empty board, an empty HOLD, and a fresh queue that
+        // happens to continue the old one.
+        let mut restarted = observation(
+            false,
+            Piece::J,
+            [Piece::L, Piece::O, Piece::S, Piece::T, Piece::Z],
+        );
+        restarted.hold = None;
+        let outcome = tracker.commit(restarted, 1.0, 2);
+        assert!(matches!(outcome, CommitOutcome::NewGame { .. }));
+        assert_eq!(tracker.pc_ordinal().get(), 1);
+        assert_eq!(tracker.snapshots().len(), 1);
+        assert_eq!(tracker.observed_queue_history().len(), 6);
+    }
+
+    #[test]
+    fn discontinuous_queue_before_the_first_hold_restarts() {
+        let mut tracker = tracker();
+        let mut early = observation(
+            false,
+            Piece::I,
+            [Piece::J, Piece::L, Piece::O, Piece::S, Piece::T],
+        );
+        early.hold = None;
+        tracker.commit(early.clone(), 1.0, 1);
+        let mut placed = observation(
+            true,
+            Piece::J,
+            [Piece::L, Piece::O, Piece::S, Piece::T, Piece::Z],
+        );
+        placed.hold = None;
+        assert!(matches!(
+            tracker.commit(placed, 1.0, 2),
+            CommitOutcome::Accepted { .. }
+        ));
+
+        // Previously rejected as a discontinuity, which froze the tracker.
+        let mut restarted = observation(
+            false,
+            Piece::T,
+            [Piece::S, Piece::Z, Piece::I, Piece::O, Piece::L],
+        );
+        restarted.hold = None;
+        assert!(matches!(
+            tracker.commit(restarted, 1.0, 3),
+            CommitOutcome::NewGame { .. }
+        ));
+        assert_eq!(tracker.pc_ordinal().get(), 1);
+    }
+
+    #[test]
+    fn undo_to_the_empty_hold_start_is_a_rollback_not_a_restart() {
+        let mut tracker = tracker();
+        let mut start = observation(
+            false,
+            Piece::I,
+            [Piece::J, Piece::L, Piece::O, Piece::S, Piece::T],
+        );
+        start.hold = None;
+        tracker.commit(start.clone(), 1.0, 1);
+        tracker.commit(
+            observation(
+                false,
+                Piece::J,
+                [Piece::L, Piece::O, Piece::S, Piece::T, Piece::Z],
+            ),
+            1.0,
+            2,
+        );
+        assert!(matches!(
+            tracker.commit(start, 1.0, 3),
+            CommitOutcome::RolledBack { steps: 1, .. }
+        ));
     }
 
     #[test]

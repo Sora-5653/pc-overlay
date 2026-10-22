@@ -528,12 +528,17 @@ without changing any session state.
 6. Done (2026-10-21): a Rust perfect-clear search after solution-finder
    with SRS+ finds the solves after a Setup Konbini setup, several at once
    (see "Perfect-clear solve search"). Not yet tried in TETR.IO.
-7. TODO (found 2026-10-21): resetting the board with `R` in TETR.IO breaks
-   the PC number. The tracker advances it on every board that empties, and
-   a restarted game cannot be told from a PC by the piece sequence, since
-   the 1st PC usually has no visible bag boundary. Until it is fixed, use
-   `Ctrl+Alt+1..7` after a reset. Planned fix: track key input (the reset
-   key) to restart at PC 1.
+7. Done (2026-10-22): resetting the board with `R` in TETR.IO restarts the
+   PC number at 1 instead of counting a PC. The tracker reads the restart
+   from the screen, not from the reset key (which can be rebound and whose
+   short press a 100 ms poll can miss): once filled, HOLD never empties
+   within a game, so HOLD going from a piece to empty is a new game; before
+   the first hold, a NEXT queue that does not continue the previous one is
+   a new game too (`CommitOutcome::NewGame`, unit-tested in
+   `src/tracker.rs`). Undo is matched first, so Undo back to the empty-HOLD
+   start is still a rollback. Not detected: a restart whose first stable
+   frame already has a piece in HOLD; use `Ctrl+Alt+1` then. Not yet tried
+   in TETR.IO.
 
 `run-overlay` is the user-facing Windows surface. The S/Z queue and save-O setups are verified;
 the sandbox setup is shown as reference guidance, not as a verified

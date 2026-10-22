@@ -1256,6 +1256,7 @@ fn commit_name(commit: &CommitOutcome) -> &'static str {
         CommitOutcome::IgnoredLowConfidence { .. } => "ignored_low_confidence",
         CommitOutcome::RejectedHistoryDiscontinuity => "history_discontinuity",
         CommitOutcome::RolledBack { .. } => "rolled_back",
+        CommitOutcome::NewGame { .. } => "new_game",
     }
 }
 
@@ -2012,8 +2013,9 @@ mod tests {
             }
         }
         let shown = guide.cells.len();
+        // HOLD stays J: an emptied HOLD would read as a restarted game.
         let mut placed = observation(
-            None,
+            Some(Piece::J),
             Piece::S,
             [Piece::Z, Piece::I, Piece::T, Piece::L, Piece::J],
         );
