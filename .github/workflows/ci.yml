@@ -3,7 +3,7 @@
 # Windows because capture, window discovery, and the overlay are Windows-only
 # (`cfg(windows)`); a Linux runner would skip compiling them. Checks that need
 # data outside the repository (the `.ttrm` corpus, czsmall_nnue's Python
-# reconstruction, a running TETR.IO) are not run here; see the README.
+# reconstruction, a running TETR.IO) are not run here; see docs/technical.md.
 name: CI
 
 on:

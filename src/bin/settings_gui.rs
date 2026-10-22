@@ -20,7 +20,7 @@ use pc_overlay_core::{
     konbini::{self, KonbiniLibrary},
 };
 
-/// The hotkeys of `run-overlay`, as listed in the README.
+/// The hotkeys of `run-overlay`, as listed in the README and docs/technical.md.
 const HOTKEYS: &str = "\
 Hotkeys while the overlay runs:
 S  -  show the solve once the setup is complete
@@ -28,7 +28,7 @@ Ctrl+Alt+S  -  show / hide the solve
 Ctrl+Alt+N / B  -  next / previous setup (or solve, once found)
 Ctrl+Alt+K  -  2nd PC: use Setup Konbini instead of the source rules
 Ctrl+Alt+F  -  download the Setup Konbini sheets again
-Ctrl+Alt+1..7  -  set the PC number (after a reset with R)";
+Ctrl+Alt+1..7  -  set the PC number (if it was miscounted)";
 
 /// Paths the overlay reads, relative to the working directory.
 struct DataPaths {

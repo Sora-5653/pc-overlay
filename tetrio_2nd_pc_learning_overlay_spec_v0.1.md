@@ -1,9 +1,20 @@
 # Perfect Clear 2nd PC 学習支援オーバーレイ 仕様書
 
-**Version:** Draft v0.1  
-**Status:** 要求定義・基本設計ドラフト  
-**Primary target:** Windows版 TETR.IO Desktop / ZEN  
-**Reference method source:** `Algebruh's 2nd Methods.md`
+**版:** 草案 v0.1  
+**状態:** 要求定義・基本設計の草案  
+**主な対象:** Windows版 TETR.IO Desktop / ZEN  
+**参照する手順の出典:** `Algebruh's 2nd Methods.md`
+
+> **現在の実装との違い（2026-10-22 追記）**: この仕様書は初版の要求を記録したもので、
+> その後の実装は範囲が広がっています。主な違いは次のとおりです。
+>
+> - 2nd PC だけでなく、1st〜7th の全ての PC で Setup Konbini のセットアップを案内する。
+> - 「PC を見つけるソルバにはしない」（1 章、3 章）としていたが、Setup Konbini の
+>   セットアップの後は SRS+ の PC 解探索で解を示す。資料の解がある 2nd PC は資料を優先する。
+> - 「初版対象外」とした節も含め、資料の全 49 ケースを自動生成している。
+> - 設定ウィンドウ（`pc-overlay-gui`）と、TETR.IO のソロ用エンジンの再現を追加した。
+>
+> 現在の動作は [README](README.md) と [技術詳細](docs/technical.md) を正とします。
 
 ---
 
