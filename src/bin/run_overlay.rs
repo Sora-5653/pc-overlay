@@ -641,7 +641,12 @@ impl KonbiniGuide {
             // A built setup, or a board no setup explains (the player went
             // their own way): search the perfect clears from here.
             self.searched = Some(observation.clone());
-            let solves = konbini::find_perfect_clears(&mut self.finder, observation, SOLVE_LIMIT);
+            let solves = konbini::find_perfect_clears(
+                &mut self.finder,
+                observation,
+                current_index(tracker, snapshot),
+                SOLVE_LIMIT,
+            );
             if !solves.is_empty() {
                 self.solve = Some(SolveSession { solves, index: 0 });
                 if let Some(guide) = solve_guide(&mut self.solve, snapshot, show) {
@@ -742,6 +747,19 @@ fn pc_pieces(
         .into_iter()
         .chain(snapshot.observed_queue_history.iter().copied())
         .collect()
+}
+
+/// Pieces dealt before Current since the game start, for the 7-bag. A
+/// perfect-clear loop deals 10 pieces per PC; the PC's pieces since then
+/// (HOLD at its start, then the queue) end with Current and NEXT5. Wrong
+/// after a resync in the middle of a PC, where the tracker misses the start;
+/// `bag_options` then usually sees a duplicate in a bag and assumes nothing.
+fn current_index(
+    tracker: &SessionTracker,
+    snapshot: &pc_overlay_core::tracker::Snapshot,
+) -> Option<usize> {
+    let before = 10 * usize::from(snapshot.pc_ordinal.get() - 1);
+    (before + pc_pieces(tracker, snapshot).len()).checked_sub(6)
 }
 
 /// The setups of the snapshot's PC that match the board and can be built
@@ -2025,5 +2043,44 @@ mod tests {
         let guide = mode.guide(&tracker, &snapshot);
         assert!(guide.status.contains("perfect clear"), "{}", guide.status);
         assert_eq!(guide.cells.len(), shown - 4, "{}", guide.status);
+    }
+
+    #[test]
+    fn a_100_percent_setup_is_solved_with_the_7th_piece_of_the_bag() {
+        let library = konbini_library();
+        let setup = library
+            .setups
+            .iter()
+            .find(|setup| setup.sol_percent == Some(100.0))
+            .unwrap();
+        let mut board = empty_board();
+        for cell in &setup.cells {
+            board[usize::from(cell.cell.y)][usize::from(cell.cell.x)] = cell.piece;
+        }
+        // The 2nd PC's 4 setup pieces end the 2nd bag: Current is index 14.
+        let mut finder = Finder::new();
+        let mut checked = 0;
+        // Each piece last, the rest in a fixed order: 7 orders of the bag.
+        for last in pc_overlay_core::finder::ALL_PIECES {
+            let first: Vec<Piece> = pc_overlay_core::finder::ALL_PIECES
+                .into_iter()
+                .filter(|piece| *piece != last)
+                .collect();
+            let observation = Observation {
+                board,
+                hold: None,
+                current: first[0],
+                next5: first[1..].try_into().unwrap(),
+            };
+            assert!(
+                !konbini::find_perfect_clears(&mut finder, &observation, Some(14), 1).is_empty(),
+                "{first:?} then {last:?}"
+            );
+            if konbini::find_perfect_clears(&mut finder, &observation, None, 1).is_empty() {
+                checked += 1;
+            }
+        }
+        // Current and NEXT alone miss some of them, as before the fix.
+        assert!(checked > 0);
     }
 }

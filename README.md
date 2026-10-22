@@ -386,8 +386,17 @@ The search follows solution-finder's two layers for a perfect clear:
 
 `Finder::perfect_clears` tries the lowest height from the top block up to
 4 rows whose empty cells the pieces can fill; `konbini::find_perfect_clears`
-runs it on the live board with HOLD, Current, and NEXT5 (pieces beyond
-NEXT are not guessed, so a solve needing them is not found). A first
+runs it on the live board with HOLD, Current, NEXT5, and the pieces after
+NEXT that the 7-bag already fixes (`finder::bag_forced`: the rest of a bag
+of which six are known; a fresh bag is not guessed). Before 2026-10-22 it
+stopped at NEXT5, and many 100% setups showed no perfect clear: the
+sheet's `SOL` counts every order of the next bag with all 7 pieces (one
+may stay in HOLD), and after a 2nd-PC setup Current and NEXT show only 6
+of them. `cargo run --release --example konbini_sol_rate` re-measures the
+2nd-PC 100% setups over all 5040 orders: 41-57% with those 6 pieces,
+100.00% with the 7th, so the SRS+ search agrees with the sheet. The
+bag position assumes 10 pieces per earlier PC and is wrong after a resync
+in the middle of a PC (a duplicate in a bag then disables it). A first
 version that searched piece orders directly (DFS over every placement)
 took about 1 s per 7-piece search, as ~100,000 fields needed move
 generation; tiling first cut that to milliseconds.

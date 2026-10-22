@@ -962,6 +962,19 @@ fn supply_options(queue: &[Piece], state: SupplyState) -> Vec<(Piece, SupplyStat
     options
 }
 
+/// The undisclosed pieces after `known` that the 7-bag already fixes: while
+/// the bag of the next position has a single piece left, that piece. After
+/// six pieces of a bag, this is its 7th; a fresh bag stops it.
+pub fn bag_forced(first_index: usize, known: &[Piece]) -> Vec<Piece> {
+    let mut extended = known.to_vec();
+    while let [options] = &bag_options(first_index, &extended, 1)[..]
+        && let [piece] = options[..]
+    {
+        extended.push(piece);
+    }
+    extended.split_off(known.len())
+}
+
 /// The pieces each undisclosed position may hold under the 7-bag, given the
 /// absolute index (pieces dealt since the game start) of `known[0]`. The
 /// pieces before `known` in the same bag are not known, so the lists can be
@@ -1235,5 +1248,17 @@ mod tests {
         assert_eq!(options[0].len(), 7);
         let options = bag_options(0, &known, 1);
         assert_eq!(options[0], vec![Piece::J, Piece::L, Piece::Z]);
+    }
+
+    #[test]
+    fn bag_forced_adds_the_last_piece_of_a_bag_only() {
+        let six = [Piece::T, Piece::I, Piece::O, Piece::S, Piece::Z, Piece::L];
+        // Six pieces from a bag start: its 7th is J, then a fresh bag.
+        assert_eq!(bag_forced(14, &six), vec![Piece::J]);
+        // Started one later, the 7th of the first bag is already past.
+        assert!(bag_forced(15, &six).is_empty());
+        // A duplicate in a bag means the index is wrong: assume nothing.
+        let wrong = [Piece::T, Piece::T, Piece::O, Piece::S, Piece::Z, Piece::L];
+        assert!(bag_forced(14, &wrong).is_empty());
     }
 }
