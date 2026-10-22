@@ -197,6 +197,14 @@ than coverage.
 
 ## Verification
 
+GitHub Actions (`.github/workflows/ci.yml`) runs `cargo fmt --check`,
+`cargo clippy --all-targets -- -D warnings`, and `cargo test --release`
+(the generated-case tests take minutes unoptimized) on a clean
+Windows checkout for every pull request and every push to `main`. It
+covers only what the repository itself contains. The Python tools, captured
+TETR.IO sessions, and anything that needs a running TETR.IO are checked
+locally.
+
 ```powershell
 cargo test
 cargo run --bin validate-rules -- data/ijlo.json
