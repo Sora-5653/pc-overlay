@@ -20,8 +20,12 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      # Pinned to the local toolchain: each Rust release adds Clippy lints,
+      # which `-D warnings` would otherwise turn into sudden CI failures.
+      # Bump it together with the local toolchain.
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.97.1"
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - name: Format
