@@ -71,3 +71,8 @@ path = "src/bin/recover_seed.rs"
 [[bin]]
 name = "pc-overlay-gui"
 path = "src/bin/settings_gui.rs"
+
+# The generated-case tests replay about 8 million bags; unoptimized they take
+# minutes, so plain `cargo test` builds optimized too.
+[profile.test]
+opt-level = 3
