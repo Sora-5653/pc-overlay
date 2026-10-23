@@ -16,6 +16,7 @@ use pc_overlay_core::{
     konbini,
     konbini::{BuildQuery, FoundSolve, KonbiniLibrary, KonbiniProgress},
     piece_code,
+    window::foreground_handle,
 };
 
 #[derive(Debug, Default)]
@@ -119,7 +120,21 @@ fn main() -> Result<(), Box<dyn Error>> {
         let active_notice = solve_notice
             .filter(|(_, at)| at.elapsed() < SOLVE_NOTICE_DURATION)
             .map(|(notice, _)| notice);
-        match locator.locate() {
+        let located = locator.locate();
+        keyboard_hook::set_target(
+            located
+                .as_ref()
+                .ok()
+                .and_then(Option::as_ref)
+                .map(|window| window.handle),
+        );
+        match located {
+            // TETR.IO is in the background: hide the overlay and skip
+            // recognition until it has focus again.
+            Ok(Some(window)) if foreground_handle() != Some(window.handle) => {
+                stability.clear_pending();
+                overlay.update(None, OverlayState::default())?;
+            }
             Ok(Some(window)) => {
                 let frame = match pc_overlay_core::capture::capture_client(&window) {
                     Ok(frame) => frame,
@@ -284,13 +299,17 @@ fn hotkey_for(key: u32, ctrl_alt: bool) -> Option<Hotkey> {
 /// the key state once per recognition loop missed about a third of presses,
 /// since a tap shorter than one loop was never seen down; the hook receives
 /// every key-down as it happens. It only observes: each key is passed on,
-/// so the game still receives S and the rest.
+/// so the game still receives S and the rest. Presses count only while
+/// TETR.IO has focus, so typing S elsewhere does not reveal a solve.
 #[cfg(windows)]
 mod keyboard_hook {
     use std::sync::{
         Mutex, OnceLock,
+        atomic::{AtomicU64, Ordering},
         mpsc::{self, Receiver, Sender},
     };
+
+    use pc_overlay_core::window::foreground_handle;
 
     use windows_sys::Win32::{
         Foundation::{LPARAM, LRESULT, WPARAM},
@@ -313,6 +332,13 @@ mod keyboard_hook {
     }
 
     static STATE: OnceLock<Mutex<HookState>> = OnceLock::new();
+    /// The TETR.IO window's handle, or 0 while there is none.
+    static TARGET: AtomicU64 = AtomicU64::new(0);
+
+    /// Sets the window that must have focus for a press to count.
+    pub fn set_target(handle: Option<u64>) {
+        TARGET.store(handle.unwrap_or(0), Ordering::Relaxed);
+    }
 
     pub fn start() -> Receiver<Hotkey> {
         let (sender, receiver) = mpsc::channel();
@@ -366,7 +392,9 @@ mod keyboard_hook {
                 // the hook it reflects every key but the one being pressed.
                 let ctrl_alt =
                     unsafe { GetAsyncKeyState(VK_CONTROL) < 0 && GetAsyncKeyState(VK_MENU) < 0 };
-                if let Some(hotkey) = hotkey_for(key, ctrl_alt) {
+                let target = TARGET.load(Ordering::Relaxed);
+                let focused = target != 0 && foreground_handle() == Some(target);
+                if focused && let Some(hotkey) = hotkey_for(key, ctrl_alt) {
                     // The receiver lives as long as the overlay loop.
                     let _ = state.sender.send(hotkey);
                 }
@@ -384,6 +412,8 @@ mod keyboard_hook {
     pub fn start() -> Receiver<super::Hotkey> {
         mpsc::channel().1
     }
+
+    pub fn set_target(_handle: Option<u64>) {}
 }
 
 /// How long a hotkey notice stays on the status line.
