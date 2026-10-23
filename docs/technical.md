@@ -295,7 +295,8 @@ OFF に戻り、Undo で前の状態に戻るとその状態の設定に戻る�
 
 `cargo run --bin fetch-konbini` で同じファイルをコンソールから取れる。各
 `Nth: Data` シートを、システムの `curl` で CSV として取得し（`gviz/tq?tqx=out:csv`。
-スプレッドシートが公開されている間は使える）、`data/konbini/1st.csv` 〜 `7th.csv` に
+スプレッドシートが公開されている間は使える。Windows では `System32\curl.exe` を絶対パスで
+呼び、HTTPS のみ・1 シート 32MiB までに制限する）、`data/konbini/1st.csv` 〜 `7th.csv` に
 保存する。このフォルダはコミットしない。シートでは、`FUMEN` の見出しごとに 1 つの
 ブロックが始まり、その左で最も近い `ID` と `SOL` の列がそのブロックのもの。5th PC の
 シートには `SOL` の見出しがなく、glue の fumen の後の割合の列を使う。セットアップの

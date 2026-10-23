@@ -471,6 +471,21 @@ pub fn sheet_csv_url(sheet: &str) -> String {
     )
 }
 
+/// The largest sheet download accepted. The biggest sheet (5th PC) is about
+/// 1.3 MB, so this only stops a runaway response.
+const MAX_SHEET_BYTES: u64 = 32 * 1024 * 1024;
+
+/// The system `curl`. On Windows it is named by its full path under
+/// `System32`, so a `curl.exe` placed next to this program is not run instead.
+fn curl_program() -> PathBuf {
+    if cfg!(windows) {
+        let root = std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into());
+        Path::new(&root).join("System32").join("curl.exe")
+    } else {
+        PathBuf::from("curl")
+    }
+}
+
 /// Downloads every stage sheet into `dir` with the system `curl`, replacing
 /// a cached file only once its download looks like a CSV with fumens.
 pub fn fetch_all(dir: &Path) -> Result<(), KonbiniError> {
@@ -486,8 +501,13 @@ pub fn fetch_all(dir: &Path) -> Result<(), KonbiniError> {
             sheet: sheet.to_string(),
             message,
         };
-        let output = Command::new(if cfg!(windows) { "curl.exe" } else { "curl" })
-            .args(["-sSfL", "--max-time", "60", "-o"])
+        // HTTPS only, redirects included, and a size limit.
+        let output = Command::new(curl_program())
+            .args(["-sSfL", "--max-time", "60"])
+            .args(["--proto", "=https", "--proto-redir", "=https"])
+            .arg("--max-filesize")
+            .arg(MAX_SHEET_BYTES.to_string())
+            .arg("-o")
             .arg(&partial)
             .arg(sheet_csv_url(sheet))
             .output()
