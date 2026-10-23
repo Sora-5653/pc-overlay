@@ -806,7 +806,16 @@ impl<'a> Replay<'a> {
             return true;
         }
         let Some(&current) = self.queue.get(index) else {
-            return false;
+            // The bag after the queue opens: its first piece can be swapped
+            // for the held piece, which goes in last. A 7th PC places all
+            // ten of its pieces ("hold S until everything is placed"); a 2nd
+            // PC has a piece to spare, so this never decides one.
+            return match hold {
+                Some(held) if !locked && index == self.queue.len() => {
+                    self.place(held, index, None, placed)
+                }
+                _ => false,
+            };
         };
         if !self.seen.insert((index, hold, placed, locked)) {
             return false;

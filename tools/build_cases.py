@@ -1,10 +1,10 @@
-"""Builds setup/solve data for every 2nd-PC case in the source document.
+"""Builds setup/solve data for every case in the source documents (`SOURCES`).
 
     python -I tools/build_cases.py report        # summary of every case
     python -I tools/build_cases.py report IJLO   # one case in detail
     python -I tools/build_cases.py write         # data/cases/*.json
 
-Pipeline, per `###` section of "Algebruh's 2nd Methods.md":
+Pipeline, per case section of each document (see `sections`):
 1. Every image reference is transcribed into a cell grid (tools/diagrams.py).
 2. An image with no gray context is a setup; the images after it, up to the
    next setup, are its solves. A solve image whose gray context equals the
@@ -45,6 +45,13 @@ def reachable(piece, board, target):
     return _cached_reachable(piece, frozenset(board), frozenset(target))
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# (document, style): the 2nd PC methods, the odd-JL no-T 2nd PCs those leave
+# out ("Bad 2nd"), and the 7th PC, whose case is three pieces.
+SOURCES = [
+    ("Algebruh's 2nd Methods.md", "2nd"),
+    ("Algebruh's Bad 2nd.md", "bad2nd"),
+    ("Algebruh's 7th.md", "7th"),
+]
 PIECES = "IJLOSTZ"
 CONTEXT = "#+"
 
@@ -72,33 +79,66 @@ def grid_cells(grid):
 # --- document structure --------------------------------------------------------
 
 
-def sections(path=SOURCE):
-    """Yields (title, line number, [(line number, text, [image names])])."""
+def sections(path=SOURCE, style="2nd"):
+    """Yields (title, line number, [(line number, text, [image names])]).
+    A case section starts at a `###` heading in the 2nd document and at a
+    `##` heading in Bad 2nd. The 7th document names its cases in headings of
+    any level and in plain lines ("**OJZ, ILZ, OLS, IJS**"); see `case_list`."""
     title, start, body = None, 0, []
     for number, line in enumerate(open(path, encoding="utf-8"), start=1):
         if line.startswith("[image"):
             break
-        heading = re.match(r"^(#{2,3})\s+(.*)", line)
-        if heading:
+        heading = re.match(r"^(#{2,4})\s+(.*)", line)
+        names = re.findall(r"!\[\]\[(image\d+)\]", line)
+        marker = style == "7th" and not heading and not names and case_list(line)
+        if heading or marker:
             if title is not None:
                 yield title, start, body
-            title = heading.group(2).strip() if heading.group(1) == "###" else None
+            text = heading.group(2).strip() if heading else line.strip()
+            if style == "7th":
+                title = text if case_list(text) else None
+            elif style == "bad2nd":
+                title = text if heading.group(1) == "##" else None
+            else:
+                title = text if heading.group(1) == "###" else None
             start, body = number, []
             continue
         if title is not None:
-            body.append((number, line.rstrip("\n"), re.findall(r"!\[\]\[(image\d+)\]", line)))
+            body.append((number, line.rstrip("\n"), names))
     if title is not None:
         yield title, start, body
 
 
+def clean_title(title):
+    return re.sub(r"!\[\]\[image\d+\]", "", title).replace("\\", "").replace("*", "").strip()
+
+
 def case_of(title):
-    """'IJLS/IJLZ-alt' -> ('IJLS', 'IJLZ', 'alt'); 'IJLO (T)' -> ('IJLO', None, 'T')."""
-    clean = title.replace("\\", "").replace("*", "").strip()
+    """'IJLS/IJLZ-alt' -> ('IJLS', 'IJLZ', 'alt'); 'IJLO (T)' -> ('IJLO', None, 'T').
+    A success rate in parentheses ('IJOS/ILOZ (99.95% / 100%)') is not a variant."""
+    clean = re.sub(r"\(\s*[\d.%/ ]+\)", "", clean_title(title)).strip()
     match = re.match(r"^(X-)?([IJLOSTZ]{4})(?:/([IJLOSTZ]{4}))?\s*(?:-\s*)?(.*)$", clean)
     if not match:
         return None, None, clean
     variant = match.group(4).strip(" -()")
     return match.group(2), match.group(3), variant or "main"
+
+
+CASE_LIST = re.compile(r"^[IJLOSTZ]{3}(?:\s*[/,]\s*[IJLOSTZ]{3})*$")
+
+
+def case_list(title):
+    """7th cases named by a title, after its last ':', '-' or '(':
+    'LO Locked - TIJ/TIL, TLJ, TLO/TJO' -> ['TIJ', 'TIL', 'TLJ', 'TLO', 'TJO'].
+    None when the title is not such a list."""
+    tail = re.split(r"[:(\-]", clean_title(title))[-1].strip(" )")
+    if not CASE_LIST.match(tail):
+        return None
+    return list(dict.fromkeys(re.findall(r"[IJLOSTZ]{3}", tail)))
+
+
+def mirror_case(case):
+    return case.translate(MIRROR)
 
 
 # --- decomposition -------------------------------------------------------------
@@ -284,29 +324,54 @@ def clone_solve(solve, setup, mirror=False):
     return other
 
 
-def share_solves(setups):
+def share_solves(setups, any_pieces=False):
     """A setup drawn without its own solves gets those of a setup with the
     same cells and pieces (TJLS image361/362, coloured for different queues)
-    or of its mirror image (JLSZ image159 is image160 mirrored)."""
-    for setup in setups:
-        if setup.solves:
+    or of its mirror image (JLSZ image159 is image160 mirrored). With
+    `any_pieces` (the 7th, whose solve is a whole bag whatever the setup is
+    built from: LO Locked image16-20) the cells alone decide. Repeated until
+    nothing changes, so a setup can take solves another one just shared."""
+    changed = True
+    while changed:
+        changed = False
+        for setup in setups:
+            if not setup.solves:
+                _share_into(setup, setups, any_pieces)
+                changed |= bool(setup.solves)
+
+
+def _share_into(setup, setups, any_pieces):
+    cells = setup.occupied()
+    used = sorted(p for p, _ in setup.placements)
+    for other in setups:
+        if other is setup or not other.solves:
             continue
-        cells = setup.occupied()
-        used = sorted(p for p, _ in setup.placements)
-        for other in setups:
-            if other is setup or not other.solves:
-                continue
-            if other.occupied() == cells and sorted(p for p, _ in other.placements) == used:
-                setup.solves = [clone_solve(so, setup) for so in other.solves]
-            elif {(9 - x, y) for x, y in other.occupied()} == cells and \
-                    sorted(p.translate(MIRROR) for p, _ in other.placements) == used:
-                setup.solves = [clone_solve(so, setup, mirror=True) for so in other.solves]
-            if setup.solves:
-                setup.notes.append(f"Solves shared from setup {other.image}.")
-                break
+        if other.occupied() == cells and (any_pieces or sorted(p for p, _ in other.placements) == used):
+            setup.solves = [clone_solve(so, setup) for so in other.solves]
+        elif {(9 - x, y) for x, y in other.occupied()} == cells and \
+                sorted(p.translate(MIRROR) for p, _ in other.placements) == used:
+            setup.solves = [clone_solve(so, setup, mirror=True) for so in other.solves]
+        if setup.solves:
+            setup.notes.append(f"Solves shared from setup {other.image}.")
+            break
 
 
-def group(title, body, images, pieces=""):
+def collapsed(cells):
+    """`cells` with every full row removed, as drawn after the clear."""
+    full = {y for _, y in cells if all((x, y) in cells for x in range(10))}
+    return {(x, y - sum(1 for r in full if r < y)) for x, y in cells if y not in full}, sorted(full)
+
+
+def uncollapse(grid, full):
+    """Reinserts the rows `full` (as gray context) into a grid drawn after
+    they cleared."""
+    rows = list(grid)
+    for y in full:
+        rows.insert(y, "#" * 10)
+    return rows
+
+
+def group(title, body, images, pieces="", style="2nd"):
     """Returns ([Setup], [problems]) for one section."""
     setups, problems = [], []
     current = None
@@ -340,7 +405,19 @@ def group(title, body, images, pieces=""):
                 current = Setup(name, number, grid)
                 setups.append(current)
                 continue
+            if style == "7th" and current is not None and context != current.occupied():
+                # A queue-based setup that completes a row, its solve drawn
+                # after the clear (JSZ image112/113): put the row back.
+                shrunk, full = collapsed(current.occupied())
+                if full and context == shrunk:
+                    grid = uncollapse(grid, full)
+                    cells = grid_cells(grid)
+                    context = {c for c, p in cells.items() if p in CONTEXT}
             if current is None:
+                if style == "7th":
+                    # The shape alone, before the coloured setups for each
+                    # case (LO Locked image15, ST/ZT image26).
+                    continue
                 current = Setup.from_context(name, number, context, pieces)
                 setups.append(current)
             last = current.solves[-1] if current.solves else None
@@ -375,7 +452,7 @@ def group(title, body, images, pieces=""):
                 problems.append(
                     f"{name} (line {number}): gray context differs from setup {current.image} "
                     f"(+{len(context - expected)} / -{len(expected - context)} cells)")
-    share_solves(setups)
+    share_solves(setups, any_pieces=style == "7th")
     return setups, problems
 
 
@@ -508,14 +585,17 @@ def playable(queue, solve_pieces, table, start_hold=None, base=""):
     def go(index, hold, mask, locked):
         if mask == goal:
             return True
-        if index >= len(queue):
-            return False
-        current = queue[index]
         ok = allowed(mask)
 
         def place(piece, new_hold):
             return any(p == piece and ok >> i & 1 and go(index + 1, new_hold, mask | 1 << i, False)
                        for i, p in enumerate(pieces))
+
+        if index >= len(queue):
+            # The next bag's first piece is swapped for the held one, which
+            # goes in last (a 7th PC places all ten of its pieces).
+            return index == len(queue) and hold is not None and not locked and place(hold, None)
+        current = queue[index]
 
         if place(current, hold):
             return True
@@ -549,6 +629,13 @@ def split_setup(case, placements):
         else:
             extras.append((piece, cells))
     return base, extras, "".join(left)
+
+
+def fits_case(case, placements, mirrored=False):
+    """True if the case pieces and one bag supply `placements`' pieces."""
+    used = [p.translate(MIRROR) if mirrored else p for p, _ in placements]
+    supply = case + PIECES
+    return all(used.count(p) <= supply.count(p) for p in set(used))
 
 
 def matches(case, placements):
@@ -599,6 +686,19 @@ def rule_sets(cases):
             continue
         case, mirror = entry["case"], entry["mirror"] or entry["case"]
         for setup in entry["setups"]:
+            if entry["cases"]:
+                # A list of cases: every case and orientation the setup's
+                # pieces match best, if one of its solves has the pieces
+                # left (ST/ZT image28 holds L; it is no TSJ setup).
+                options = [(c, m) for c in entry["cases"] for m in (False, True)]
+                score = {(c, m): matches(c, mirror_placements(setup.placements) if m else setup.placements)
+                         for c, m in options}
+                best = max(score.values())
+                for c, m in options:
+                    if score[(c, m)] == best and (not setup.solves or any(
+                            fits_case(c, setup.placements + so.placements, m) for so in setup.solves)):
+                        by_case.setdefault(c, []).append((order, entry, setup, m))
+                continue
             if mirror != case and matches(mirror, setup.placements) > matches(case, setup.placements):
                 owner, other = mirror, case
             else:
@@ -632,7 +732,7 @@ def rule_sets(cases):
                     "review_status": "verified" if srs_ok else "review_required",
                     "condition": {"op": "always"},
                     "target": [placement_json(p, c) for p, c in geo_solve.placements],
-                    "source": {"document": "Algebruh's 2nd Methods.md",
+                    "source": {"document": entry["document"],
                                "lines": [setup.line, setup.line],
                                "images": list(solve.images),
                                "note": ("Generated by tools/build_cases.py; "
@@ -684,7 +784,7 @@ def rule_sets(cases):
                                     "setup": [p for p, _ in base], "solves": conds},
                 "placements": [placement_json(p, c) for p, c in setup_geo],
                 "solves": solves_json,
-                "source": {"document": "Algebruh's 2nd Methods.md",
+                "source": {"document": entry["document"],
                            "lines": [setup.line, setup.line],
                            "images": [stages[-1]],
                            "note": note + (f" Drawn in stages: {', '.join(stages)}." if len(stages) > 1 else "")},
@@ -694,7 +794,7 @@ def rule_sets(cases):
         yield case_id, {
             "schema_version": 1,
             "case": {"id": case_id, "family": "generated",
-                     "source": {"document": "Algebruh's 2nd Methods.md", "lines": [min(lines), max(lines)],
+                     "source": {"document": items[0][1]["document"], "lines": [min(lines), max(lines)],
                                 "images": sorted(set(images), key=lambda n: int(n[5:])),
                                 "note": "Generated by tools/build_cases.py. A setup is verified when one of its "
                                         "solves has an SRS 90-degree placement order; its build condition is "
@@ -706,7 +806,7 @@ def rule_sets(cases):
 def write():
     out = os.path.join(ROOT, "data", "cases")
     os.makedirs(out, exist_ok=True)
-    cases = analyse()
+    cases = analyse_all()
     written = []
     for case_id, rules in rule_sets(cases):
         path = os.path.join(out, f"{case_id}.json")
@@ -817,25 +917,60 @@ def complete(setup, solve, case, mirror):
     return completed
 
 
-def analyse(path=SOURCE):
+def title_cases(title, style):
+    """(case, mirror, variant, case list). A 7th title naming one case or a
+    mirror pair reads like a 2nd-PC title; a longer list (with the mirror of
+    every listed case added, as the source mirrors its setups) is assigned
+    setup by setup in `rule_sets`."""
+    if style != "7th":
+        return case_of(title) + (None,)
+    found = case_list(title) or []
+    if len(found) == 1:
+        return found[0], None, "main", None
+    if len(found) == 2 and same_case(mirror_case(found[0]), found[1]):
+        return found[0], found[1], "main", None
+    # Cases are piece sets: a mirror spelt differently ('LZS' for the listed
+    # 'LSZ') is the same case.
+    listed = []
+    for case in found + [mirror_case(c) for c in found]:
+        if not any(same_case(case, known) for known in listed):
+            listed.append(case)
+    return listed[0], None, "main", listed
+
+
+def same_case(a, b):
+    return sorted(a) == sorted(b)
+
+
+def list_owner(cases, placements):
+    """The listed case the setup's pieces match best, unmirrored."""
+    return max(cases, key=lambda case: matches(case, placements))
+
+
+def analyse(path=SOURCE, style="2nd"):
     images = load_images(path)
     cases = []
-    for title, line, body in sections(path):
-        case, mirror, variant = case_of(title)
-        setups, problems = group(title, body, images, case or "")
+    for title, line, body in sections(path, style):
+        case, mirror, variant, listed = title_cases(title, style)
+        pieces = "".join(sorted(set("".join(listed)))) if listed else case or ""
+        setups, problems = group(title, body, images, pieces, style)
         for setup in setups:
             problems.extend(f"setup {setup.image}: {p}" for p in setup.problems)
             used = sorted(p for p, _ in setup.placements)
             fits = lambda name: name and all(used.count(p) <= name.count(p) for p in set(used))  # noqa: E731
-            if case and not (fits(case) or fits(mirror)):
+            if listed and not any(fits(c) for c in listed):
+                setup.notes.append(f"setup {setup.image} uses {''.join(used)}, not a subset of "
+                                   + " or ".join(listed))
+            elif not listed and case and not (fits(case) or fits(mirror)):
                 setup.notes.append(f"setup {setup.image} uses {''.join(used)}, not a subset of {case}"
                                 + (f" or {mirror}" if mirror else ""))
+            owner = list_owner(listed, setup.placements) if listed else case
             completed = []
             for solve in setup.solves:
                 solve.problems.extend(frame_check(setup, solve))
                 solve.reachable = False
                 if solve.problems and all("empty" in p or "do not make" in p for p in solve.problems):
-                    extra = complete(setup, solve, case, mirror)
+                    extra = complete(setup, solve, owner, None if listed else mirror)
                     if extra:
                         solve.replaced_by = extra
                         completed.extend(extra)
@@ -868,15 +1003,21 @@ def analyse(path=SOURCE):
                 kept.append(so)
             setup.solves = kept + completed
         cases.append({"title": title, "line": line, "case": case, "mirror": mirror, "variant": variant,
+                      "cases": listed, "document": os.path.basename(path),
                       "setups": setups, "problems": problems})
     return cases
 
 
+def analyse_all():
+    """Every source document's sections, in `SOURCES` order."""
+    return [entry for name, style in SOURCES for entry in analyse(os.path.join(ROOT, name), style)]
+
+
 def report(selected=None):
-    cases = analyse()
+    cases = analyse_all()
     totals = [0, 0, 0, 0]
     for entry in cases:
-        if selected and entry["case"] != selected:
+        if selected and selected not in (entry["cases"] or [entry["case"]]):
             continue
         setups = entry["setups"]
         solves = [s for st in setups for s in st.solves]
