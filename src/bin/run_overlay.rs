@@ -9,17 +9,14 @@ use std::{
 
 use pc_overlay_core::{
     BoardCalibration, CommitOutcome, DiagramSet, FrameSize, OverlayBoard, OverlayCell,
-    OverlayCellKind, OverlayState, OverlayWindow, Piece, RecognizerConfig, RuleSet, SessionTracker,
-    SolveProgress, SourceSections, StabilityConfig, StabilityFilter, TetrioRecognizer,
-    TrackerConfig, WindowInfo, WindowLocator, board_is_empty,
+    OverlayCellKind, OverlayState, OverlayWindow, PcOrdinal, Piece, RecognizerConfig, RuleSet,
+    SessionTracker, SolveProgress, SourceSections, StabilityConfig, StabilityFilter,
+    TetrioRecognizer, TrackerConfig, WindowInfo, WindowLocator, board_is_empty,
     finder::{Buildable, Finder},
     konbini,
     konbini::{BuildQuery, FoundSolve, KonbiniLibrary, KonbiniProgress},
     piece_code,
 };
-
-#[cfg(windows)]
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
 
 #[derive(Debug, Default)]
 struct Args {
@@ -73,10 +70,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     let locator = WindowLocator::default();
     let mut stability = StabilityFilter::new(StabilityConfig::default());
     let mut tracker = SessionTracker::new(TrackerConfig::default());
-    let mut resync_hotkeys = PcResyncHotkeys::default();
-    let mut solve_hotkeys = SolveHotkeys::default();
+    let mut pieces_reading = PiecesReading::default();
+    let hotkeys = keyboard_hook::start();
     let mut solve_notice: Option<(&'static str, Instant)> = None;
-    let mut konbini_hotkeys = KonbiniHotkeys::default();
     let mut konbini = KonbiniGuide::new(args.konbini.clone());
     konbini.load_or_fetch();
     // Ctrl+Alt+K: the 2nd PC uses Setup Konbini even when the source has rules.
@@ -92,32 +88,34 @@ fn main() -> Result<(), Box<dyn Error>> {
         if !overlay.pump() {
             break;
         }
-        if let Some(ordinal) = resync_hotkeys.poll() {
-            tracker.resync(ordinal);
-            stability.reset();
-            eprintln!("PC number manually resynchronized to {}", ordinal.get());
-        }
-        if let Some(hotkey) = konbini_hotkeys.poll() {
-            if hotkey == KonbiniHotkey::PreferKonbini {
-                prefer_konbini = !prefer_konbini;
-                let notice = if prefer_konbini {
-                    "2nd PC: Setup Konbini"
-                } else {
-                    "2nd PC: source rules first"
-                };
-                eprintln!("{notice}");
-                solve_notice = Some((notice, Instant::now()));
-            } else {
-                konbini.apply(hotkey);
+        for hotkey in hotkeys.try_iter() {
+            match hotkey {
+                Hotkey::Resync(ordinal) => {
+                    tracker.resync(ordinal);
+                    stability.reset();
+                    eprintln!("PC number manually resynchronized to {}", ordinal.get());
+                }
+                Hotkey::Konbini(KonbiniHotkey::PreferKonbini) => {
+                    prefer_konbini = !prefer_konbini;
+                    let notice = if prefer_konbini {
+                        "2nd PC: Setup Konbini"
+                    } else {
+                        "2nd PC: source rules first"
+                    };
+                    eprintln!("{notice}");
+                    solve_notice = Some((notice, Instant::now()));
+                }
+                Hotkey::Konbini(hotkey) => konbini.apply(hotkey),
+                Hotkey::Solve(hotkey) => {
+                    if let Some(notice) = apply_solve_hotkey(&mut tracker, hotkey, solve_available)
+                    {
+                        eprintln!("{notice}");
+                        solve_notice = Some((notice, Instant::now()));
+                    }
+                }
             }
         }
         konbini.poll_fetch();
-        if let Some(hotkey) = solve_hotkeys.poll()
-            && let Some(notice) = apply_solve_hotkey(&mut tracker, hotkey, solve_available)
-        {
-            eprintln!("{notice}");
-            solve_notice = Some((notice, Instant::now()));
-        }
         let active_notice = solve_notice
             .filter(|(_, at)| at.elapsed() < SOLVE_NOTICE_DURATION)
             .map(|(notice, _)| notice);
@@ -157,23 +155,31 @@ fn main() -> Result<(), Box<dyn Error>> {
                     )),
                     _ => None,
                 };
-                let guide = match stable.as_ref() {
-                    Some(pc_overlay_core::StabilityOutcome::Stable { .. }) => {
-                        tracker.snapshots().last().map(|snapshot| {
-                            unified_guidance(
-                                &library,
-                                &mut konbini,
-                                &tracker,
-                                snapshot,
-                                args.reviewed_only,
-                                prefer_konbini,
-                            )
-                        })
-                    }
-                    _ => None,
-                };
-                // Kept from the last tracked state while frames are unstable,
-                // as the solve hotkeys were judged on the latest snapshot.
+                // The PIECES counter, when shown, decides the PC number; the
+                // tracker's own count is the fallback when it is unreadable.
+                let pieces = pieces_reading.confirm(recognition.pieces_placed);
+                if commit.is_some()
+                    && let Some(pieces) = pieces
+                    && tracker.align_pc_ordinal(PcOrdinal::from_pieces_placed(pieces))
+                {
+                    eprintln!(
+                        "PC number aligned to {} from PIECES {pieces}",
+                        tracker.pc_ordinal().get()
+                    );
+                }
+                // Always the guidance for the last tracked state, so it stays
+                // on screen while recognition pauses (a piece falling below
+                // the spawn rows, or frames settling after a lock).
+                let guide = tracker.snapshots().last().map(|snapshot| {
+                    unified_guidance(
+                        &library,
+                        &mut konbini,
+                        &tracker,
+                        snapshot,
+                        args.reviewed_only,
+                        prefer_konbini,
+                    )
+                });
                 if let Some(guide) = &guide {
                     solve_available = guide.setup_complete;
                 }
@@ -184,6 +190,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     stable.as_ref(),
                     commit.as_ref(),
                     &tracker,
+                    pieces,
                     guide,
                     args.verbose,
                 );
@@ -223,33 +230,18 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// The PIECES counter, trusted once two consecutive frames read the same
+/// value, so a frame caught mid-redraw cannot move the PC number.
 #[derive(Debug, Default)]
-struct PcResyncHotkeys {
-    was_down: [bool; 7],
+struct PiecesReading {
+    last: Option<u32>,
 }
 
-impl PcResyncHotkeys {
-    #[cfg(windows)]
-    fn poll(&mut self) -> Option<pc_overlay_core::PcOrdinal> {
-        const VK_CONTROL: i32 = 0x11;
-        const VK_MENU: i32 = 0x12;
-        const VK_1: i32 = 0x31;
-
-        let modifiers = key_is_down(VK_CONTROL) && key_is_down(VK_MENU);
-        let mut pressed = None;
-        for (index, was_down) in self.was_down.iter_mut().enumerate() {
-            let down = modifiers && key_is_down(VK_1 + index as i32);
-            if down && !*was_down {
-                pressed = pc_overlay_core::PcOrdinal::new(index as u8 + 1);
-            }
-            *was_down = down;
-        }
-        pressed
-    }
-
-    #[cfg(not(windows))]
-    fn poll(&mut self) -> Option<pc_overlay_core::PcOrdinal> {
-        None
+impl PiecesReading {
+    fn confirm(&mut self, reading: Option<u32>) -> Option<u32> {
+        let confirmed = reading.filter(|_| self.last == reading);
+        self.last = reading;
+        confirmed
     }
 }
 
@@ -261,35 +253,136 @@ enum SolveHotkey {
     Show,
 }
 
-/// Ctrl+Alt+S and plain S, edge-triggered on S like the resync keys. The
-/// overlay only reads key state, so the game still receives the S press.
-#[derive(Debug, Default)]
-struct SolveHotkeys {
-    was_down: bool,
+/// A hotkey press, as delivered by the keyboard hook.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Hotkey {
+    /// Ctrl+Alt+1..7: resynchronize the PC number.
+    Resync(PcOrdinal),
+    /// S or Ctrl+Alt+S.
+    Solve(SolveHotkey),
+    /// Ctrl+Alt+K / N / B / F.
+    Konbini(KonbiniHotkey),
 }
 
-impl SolveHotkeys {
-    #[cfg(windows)]
-    fn poll(&mut self) -> Option<SolveHotkey> {
-        const VK_CONTROL: i32 = 0x11;
-        const VK_MENU: i32 = 0x12;
-        const VK_S: i32 = 0x53;
+/// The hotkey a key-down of virtual key `key` makes, given whether Ctrl and
+/// Alt are both held.
+fn hotkey_for(key: u32, ctrl_alt: bool) -> Option<Hotkey> {
+    match (key, ctrl_alt) {
+        (0x53, true) => Some(Hotkey::Solve(SolveHotkey::Toggle)),
+        (0x53, false) => Some(Hotkey::Solve(SolveHotkey::Show)),
+        (_, false) => None,
+        (0x31..=0x37, true) => PcOrdinal::new((key - 0x30) as u8).map(Hotkey::Resync),
+        (0x4B, true) => Some(Hotkey::Konbini(KonbiniHotkey::PreferKonbini)),
+        (0x4E, true) => Some(Hotkey::Konbini(KonbiniHotkey::Next)),
+        (0x42, true) => Some(Hotkey::Konbini(KonbiniHotkey::Previous)),
+        (0x46, true) => Some(Hotkey::Konbini(KonbiniHotkey::Refetch)),
+        _ => None,
+    }
+}
 
-        let down = key_is_down(VK_S);
-        let pressed = down && !self.was_down;
-        self.was_down = down;
-        pressed.then(|| {
-            if key_is_down(VK_CONTROL) && key_is_down(VK_MENU) {
-                SolveHotkey::Toggle
-            } else {
-                SolveHotkey::Show
-            }
-        })
+/// Hotkeys from a low-level keyboard hook on a thread of its own. Polling
+/// the key state once per recognition loop missed about a third of presses,
+/// since a tap shorter than one loop was never seen down; the hook receives
+/// every key-down as it happens. It only observes: each key is passed on,
+/// so the game still receives S and the rest.
+#[cfg(windows)]
+mod keyboard_hook {
+    use std::sync::{
+        Mutex, OnceLock,
+        mpsc::{self, Receiver, Sender},
+    };
+
+    use windows_sys::Win32::{
+        Foundation::{LPARAM, LRESULT, WPARAM},
+        System::LibraryLoader::GetModuleHandleW,
+        UI::{
+            Input::KeyboardAndMouse::GetAsyncKeyState,
+            WindowsAndMessaging::{
+                CallNextHookEx, GetMessageW, HC_ACTION, KBDLLHOOKSTRUCT, MSG, SetWindowsHookExW,
+                WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
+            },
+        },
+    };
+
+    use super::{Hotkey, hotkey_for};
+
+    struct HookState {
+        sender: Sender<Hotkey>,
+        /// Keys currently down, so auto-repeated key-downs count once.
+        down: [bool; 256],
     }
 
-    #[cfg(not(windows))]
-    fn poll(&mut self) -> Option<SolveHotkey> {
-        None
+    static STATE: OnceLock<Mutex<HookState>> = OnceLock::new();
+
+    pub fn start() -> Receiver<Hotkey> {
+        let (sender, receiver) = mpsc::channel();
+        let state = HookState {
+            sender,
+            down: [false; 256],
+        };
+        if STATE.set(Mutex::new(state)).is_ok() {
+            std::thread::spawn(|| {
+                // SAFETY: `hook_proc` matches HOOKPROC and stays valid for the
+                // whole process. A low-level hook is called on the installing
+                // thread, which therefore runs a message loop until exit.
+                unsafe {
+                    let module = GetModuleHandleW(std::ptr::null());
+                    let hook = SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook_proc), module, 0);
+                    if hook.is_null() {
+                        eprintln!("warning: keyboard hook unavailable; hotkeys are disabled");
+                        return;
+                    }
+                    let mut message: MSG = std::mem::zeroed();
+                    while GetMessageW(&mut message, std::ptr::null_mut(), 0, 0) > 0 {}
+                }
+            });
+        }
+        receiver
+    }
+
+    unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+        if code == HC_ACTION as i32 {
+            // SAFETY: for HC_ACTION, `lparam` points to a KBDLLHOOKSTRUCT.
+            let event = unsafe { &*(lparam as *const KBDLLHOOKSTRUCT) };
+            record(event.vkCode, wparam as u32);
+        }
+        // SAFETY: passes the event on unchanged; the hook handle is optional.
+        unsafe { CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam) }
+    }
+
+    fn record(key: u32, message: u32) {
+        let Some(Ok(mut state)) = STATE.get().map(Mutex::lock) else {
+            return;
+        };
+        let Some(down) = state.down.get_mut(key as usize) else {
+            return;
+        };
+        match message {
+            WM_KEYDOWN | WM_SYSKEYDOWN if !*down => {
+                *down = true;
+                const VK_CONTROL: i32 = 0x11;
+                const VK_MENU: i32 = 0x12;
+                // SAFETY: GetAsyncKeyState takes a virtual key code only. In
+                // the hook it reflects every key but the one being pressed.
+                let ctrl_alt =
+                    unsafe { GetAsyncKeyState(VK_CONTROL) < 0 && GetAsyncKeyState(VK_MENU) < 0 };
+                if let Some(hotkey) = hotkey_for(key, ctrl_alt) {
+                    // The receiver lives as long as the overlay loop.
+                    let _ = state.sender.send(hotkey);
+                }
+            }
+            WM_KEYUP | WM_SYSKEYUP => *down = false,
+            _ => {}
+        }
+    }
+}
+
+#[cfg(not(windows))]
+mod keyboard_hook {
+    use std::sync::mpsc::{self, Receiver};
+
+    pub fn start() -> Receiver<super::Hotkey> {
+        mpsc::channel().1
     }
 }
 
@@ -330,42 +423,6 @@ enum KonbiniHotkey {
     Previous,
     /// Ctrl+Alt+F: download the sheets again.
     Refetch,
-}
-
-/// Ctrl+Alt+K / N / B / F, edge-triggered like the resync keys.
-#[derive(Debug, Default)]
-struct KonbiniHotkeys {
-    was_down: [bool; 4],
-}
-
-impl KonbiniHotkeys {
-    #[cfg(windows)]
-    fn poll(&mut self) -> Option<KonbiniHotkey> {
-        const VK_CONTROL: i32 = 0x11;
-        const VK_MENU: i32 = 0x12;
-        const KEYS: [(i32, KonbiniHotkey); 4] = [
-            (0x4B, KonbiniHotkey::PreferKonbini),
-            (0x4E, KonbiniHotkey::Next),
-            (0x42, KonbiniHotkey::Previous),
-            (0x46, KonbiniHotkey::Refetch),
-        ];
-
-        let modifiers = key_is_down(VK_CONTROL) && key_is_down(VK_MENU);
-        let mut pressed = None;
-        for ((key, hotkey), was_down) in KEYS.iter().zip(&mut self.was_down) {
-            let down = modifiers && key_is_down(*key);
-            if down && !*was_down {
-                pressed = Some(*hotkey);
-            }
-            *was_down = down;
-        }
-        pressed
-    }
-
-    #[cfg(not(windows))]
-    fn poll(&mut self) -> Option<KonbiniHotkey> {
-        None
-    }
 }
 
 /// Where the guidance on screen comes from.
@@ -891,13 +948,6 @@ fn konbini_render(
     }
 }
 
-#[cfg(windows)]
-fn key_is_down(key: i32) -> bool {
-    // SAFETY: GetAsyncKeyState has no pointer arguments and accepts a virtual
-    // key code. The high bit is the documented current-key-down state.
-    unsafe { GetAsyncKeyState(key) < 0 }
-}
-
 #[allow(clippy::too_many_arguments)]
 fn build_overlay_state(
     window: &WindowInfo,
@@ -906,6 +956,7 @@ fn build_overlay_state(
     stable: Option<&pc_overlay_core::StabilityOutcome>,
     commit: Option<&CommitOutcome>,
     tracker: &SessionTracker,
+    pieces: Option<u32>,
     guide: Option<Guide>,
     verbose: bool,
 ) -> OverlayState {
@@ -941,43 +992,44 @@ fn build_overlay_state(
         ));
     }
 
-    let mut badge = String::new();
-    let (status, cells) = if recognition.observation.is_none() {
-        (
-            "PC Overlay: recognition paused (unknown or unstable)".to_string(),
-            Vec::new(),
-        )
+    // Why this frame did not update the tracked state, if it did not.
+    let paused = if recognition.observation.is_none() {
+        Some("recognition paused (unknown or unstable)".to_string())
     } else {
         match stable {
-            Some(pc_overlay_core::StabilityOutcome::Pending { consecutive_frames }) => (
-                format!("PC Overlay: waiting for stable frame ({consecutive_frames}/3)"),
-                Vec::new(),
-            ),
-            Some(pc_overlay_core::StabilityOutcome::IgnoredLowConfidence { .. }) => (
-                "PC Overlay: recognition confidence too low".to_string(),
-                Vec::new(),
-            ),
-            Some(pc_overlay_core::StabilityOutcome::Stable { .. }) => match guide {
-                Some(guide) => {
-                    detail.push_str(&format!("  guide={}", guide.origin.label()));
-                    if let Some(note) = &guide.note {
-                        detail.push_str(&format!(" ({note})"));
-                    }
-                    if let Some(rate) = guide.pc_rate {
-                        badge = format!("PC {rate:.2}%");
-                    }
-                    (guide.status, guide.cells)
-                }
-                None => (
-                    "PC Overlay: waiting for first tracked state".to_string(),
-                    Vec::new(),
-                ),
-            },
-            None => (
-                "PC Overlay: recognition paused (unknown or unstable)".to_string(),
-                Vec::new(),
-            ),
+            Some(pc_overlay_core::StabilityOutcome::Stable { .. }) => None,
+            Some(pc_overlay_core::StabilityOutcome::Pending { consecutive_frames }) => {
+                Some(format!("waiting for stable frame ({consecutive_frames}/3)"))
+            }
+            Some(pc_overlay_core::StabilityOutcome::IgnoredLowConfidence { .. }) => {
+                Some("recognition confidence too low".to_string())
+            }
+            None => Some("recognition paused (unknown or unstable)".to_string()),
         }
+    };
+    let mut badge = String::new();
+    let (status, cells) = match (guide, paused) {
+        (Some(guide), paused) => {
+            detail.push_str(&format!("  guide={}", guide.origin.label()));
+            if let Some(note) = &guide.note {
+                detail.push_str(&format!(" ({note})"));
+            }
+            if let Some(rate) = guide.pc_rate {
+                badge = format!("PC {rate:.2}%");
+            }
+            // The guidance of the last tracked state stays up while a piece
+            // falls; recognition resumes once it is next stable.
+            let status = match paused {
+                Some(reason) => format!("{} | last stable state: {reason}", guide.status),
+                None => guide.status,
+            };
+            (status, guide.cells)
+        }
+        (None, Some(reason)) => (format!("PC Overlay: {reason}"), Vec::new()),
+        (None, None) => (
+            "PC Overlay: waiting for first tracked state".to_string(),
+            Vec::new(),
+        ),
     };
 
     if let Some(commit) = commit {
@@ -985,6 +1037,10 @@ fn build_overlay_state(
         detail.push_str(commit_name(commit));
     }
     detail.push_str(&format!("  PC {}", tracker.pc_ordinal().get()));
+    match pieces {
+        Some(pieces) => detail.push_str(&format!(" (PIECES {pieces})")),
+        None => detail.push_str(" (own count)"),
+    }
     detail.push_str(if tracker.guidance().show_solve {
         "  solve ON"
     } else {
@@ -1723,6 +1779,30 @@ mod tests {
         commit_board(&mut tracker, board_with(&setup.placements), 6);
         let (_, cells) = latest_guidance(&rules, &tracker);
         assert!(cells.is_empty());
+    }
+
+    #[test]
+    fn key_downs_map_to_hotkeys_only_with_their_modifiers() {
+        const VK_S: u32 = 0x53;
+        assert_eq!(
+            hotkey_for(VK_S, false),
+            Some(Hotkey::Solve(SolveHotkey::Show))
+        );
+        assert_eq!(
+            hotkey_for(VK_S, true),
+            Some(Hotkey::Solve(SolveHotkey::Toggle))
+        );
+        assert_eq!(
+            hotkey_for(0x33, true),
+            Some(Hotkey::Resync(PcOrdinal::new(3).unwrap()))
+        );
+        assert_eq!(hotkey_for(0x33, false), None, "plain 3 is a game key");
+        assert_eq!(hotkey_for(0x38, true), None, "there is no 8th PC");
+        assert_eq!(
+            hotkey_for(0x4E, true),
+            Some(Hotkey::Konbini(KonbiniHotkey::Next))
+        );
+        assert_eq!(hotkey_for(0x4E, false), None);
     }
 
     #[test]

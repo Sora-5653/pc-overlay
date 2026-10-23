@@ -93,6 +93,12 @@ impl PcOrdinal {
         (1..=7).contains(&value).then_some(Self(value))
     }
 
+    /// The PC being built after `pieces` placements, assuming every PC of the
+    /// loop took 10 pieces: 0-9 is the 1st, 10-19 the 2nd, 70-79 the 1st again.
+    pub const fn from_pieces_placed(pieces: u32) -> Self {
+        Self(((pieces / 10) % 7) as u8 + 1)
+    }
+
     pub const fn get(self) -> u8 {
         self.0
     }
@@ -124,6 +130,17 @@ mod tests {
             assert_eq!(ordinal.get(), expected);
         }
         assert_eq!(ordinal.advance().get(), 1);
+    }
+
+    #[test]
+    fn ordinal_from_pieces_placed_counts_ten_per_pc() {
+        let ordinal = |pieces| PcOrdinal::from_pieces_placed(pieces).get();
+        assert_eq!(ordinal(0), 1);
+        assert_eq!(ordinal(4), 1);
+        assert_eq!(ordinal(10), 2);
+        assert_eq!(ordinal(69), 7);
+        assert_eq!(ordinal(70), 1);
+        assert_eq!(ordinal(125), 6);
     }
 
     #[test]
