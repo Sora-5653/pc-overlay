@@ -81,3 +81,10 @@ cargo build --release
 - [Setup Konbini](https://docs.google.com/spreadsheets/d/1tI9fPeeEEEhWS2h0Gzib5UIjLKN33wd18WQSKRjxYMw/edit)
 - knewjade 氏の solution-finder（消し方の探索の考え方）
 - triangle.js（TETR.IO の回転の規則の表）
+
+## ライセンス
+
+このツールのプログラムは [MIT ライセンス](LICENSE) で公開しています。
+
+ただし `Algebruh's 2nd Methods.md` は Algebruh 氏の著作物で、MIT ライセンスの
+対象外です。権利は Algebruh 氏にあります。
