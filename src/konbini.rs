@@ -221,34 +221,51 @@ impl FoundSolve {
     pub fn progress(&self, board: &Board) -> Option<KonbiniProgress> {
         drawing_progress(&self.target, &self.cells, board)
     }
+
+    /// Whether the board still follows this solve and its pieces left can be
+    /// played with the HOLD, Current, and NEXT shown now.
+    pub fn playable(&self, finder: &mut Finder, observation: &Observation) -> bool {
+        let Some(progress) = self.progress(&observation.board) else {
+            return false;
+        };
+        let queue = visible_queue(observation);
+        let supply = Supply::Queue {
+            hold: observation.hold,
+            queue: &queue,
+        };
+        !finder
+            .solutions(&self.target, progress.placed, supply, 1)
+            .is_empty()
+    }
+}
+
+/// Current followed by NEXT.
+fn visible_queue(observation: &Observation) -> Vec<Piece> {
+    std::iter::once(observation.current)
+        .chain(observation.next5)
+        .collect()
 }
 
 /// Perfect clears from the live board with its HOLD, Current, and NEXT
 /// (SRS+, one HOLD slot), at the lowest height that has one; at most
-/// `limit`. Empty when the board is too high or the known pieces cannot
+/// `limit`. Empty when the board is too high or the shown pieces cannot
 /// finish it.
 ///
-/// `current_index` (pieces dealt before Current since the game start) adds
-/// the pieces after NEXT that the 7-bag fixes. The sheet's `SOL` counts
-/// every order of the next bag with all 7 pieces, one of which may stay in
-/// HOLD; with Current and NEXT alone (6 of them) a 100% setup measured
-/// 41-57% (`examples/konbini_sol_rate.rs`).
+/// Only the pieces on screen are used, so every solve shown can be played
+/// as it stands. The sheet's `SOL` counts every order of the next bag with
+/// all 7 pieces, one of which may stay in HOLD; with Current and NEXT alone
+/// (6 of them) a 100% setup measured 41-57% (`examples/konbini_sol_rate.rs`).
+/// The 7th piece shows in NEXT once a piece is placed, and the search runs
+/// again then.
 pub fn find_perfect_clears(
     finder: &mut Finder,
     observation: &Observation,
-    current_index: Option<usize>,
     limit: usize,
 ) -> Vec<FoundSolve> {
     let Some(field) = board_field(&observation.board) else {
         return Vec::new();
     };
-    let mut queue: Vec<Piece> = std::iter::once(observation.current)
-        .chain(observation.next5)
-        .collect();
-    if let Some(index) = current_index {
-        let forced = finder::bag_forced(index, &queue);
-        queue.extend(forced);
-    }
+    let queue = visible_queue(observation);
     let supply = Supply::Queue {
         hold: observation.hold,
         queue: &queue,

@@ -396,6 +396,8 @@ struct Guide {
     setup_complete: bool,
     /// Why the source rules were not used, for the detail line.
     note: Option<String>,
+    /// The Setup Konbini PC rate (`SOL`) of the setup shown or built.
+    pc_rate: Option<f32>,
 }
 
 /// One guidance for every PC. The 2nd PC uses the source rules when they
@@ -427,6 +429,7 @@ fn unified_guidance(
                         origin: Origin::Source,
                         setup_complete,
                         note: None,
+                        pc_rate: None,
                     };
                 }
             }
@@ -458,6 +461,9 @@ struct KonbiniGuide {
     /// The last state searched for a perfect clear, so a state without one
     /// is searched once.
     searched: Option<pc_overlay_core::Observation>,
+    /// The PC rate of the setup last seen complete in this PC, kept for the
+    /// solves searched from it.
+    built_rate: Option<f32>,
 }
 
 /// Perfect clears found by the solve search, cycled by Ctrl+Alt+N / B.
@@ -465,6 +471,10 @@ struct KonbiniGuide {
 struct SolveSession {
     solves: Vec<FoundSolve>,
     index: isize,
+    /// The PC rate of the setup the search started from.
+    pc_rate: Option<f32>,
+    /// The state `solves` were last checked against.
+    checked: pc_overlay_core::Observation,
 }
 
 /// Perfect clears kept per search.
@@ -497,6 +507,7 @@ impl KonbiniGuide {
             shortlist: None,
             solve: None,
             searched: None,
+            built_rate: None,
         }
     }
 
@@ -587,6 +598,7 @@ impl KonbiniGuide {
             self.index = 0;
             self.solve = None;
             self.searched = None;
+            self.built_rate = None;
         }
         let message = if self.fetching.is_some() {
             Some("fetching Setup Konbini...".to_string())
@@ -607,6 +619,7 @@ impl KonbiniGuide {
                 origin: Origin::Konbini,
                 setup_complete: false,
                 note: None,
+                pc_rate: None,
             };
         };
         let key = (
@@ -628,6 +641,19 @@ impl KonbiniGuide {
         let shortlist = &self.shortlist.as_ref().expect("just computed").1;
         let observation = &snapshot.observation;
         let show = tracker.guidance().show_solve;
+        // Keep only the solves the pieces shown now can still finish: the
+        // player may have used HOLD or an order the solve does not allow.
+        if let Some(session) = self.solve.as_mut()
+            && session.checked != *observation
+        {
+            session
+                .solves
+                .retain(|solve| solve.playable(&mut self.finder, observation));
+            session.checked = observation.clone();
+            if session.solves.is_empty() {
+                self.solve = None;
+            }
+        }
         if let Some(guide) = solve_guide(&mut self.solve, snapshot, show) {
             return guide;
         }
@@ -636,19 +662,22 @@ impl KonbiniGuide {
             .ok()
             .and_then(|index| shortlist.get(index))
             .is_some_and(|candidate| candidate.progress.complete());
+        if shown_complete {
+            self.built_rate = guide.pc_rate;
+        }
         let board_off_setup = shortlist.is_empty() && !board_is_empty(&observation.board);
         if (shown_complete || board_off_setup) && self.searched.as_ref() != Some(observation) {
             // A built setup, or a board no setup explains (the player went
             // their own way): search the perfect clears from here.
             self.searched = Some(observation.clone());
-            let solves = konbini::find_perfect_clears(
-                &mut self.finder,
-                observation,
-                current_index(tracker, snapshot),
-                SOLVE_LIMIT,
-            );
+            let solves = konbini::find_perfect_clears(&mut self.finder, observation, SOLVE_LIMIT);
             if !solves.is_empty() {
-                self.solve = Some(SolveSession { solves, index: 0 });
+                self.solve = Some(SolveSession {
+                    solves,
+                    index: 0,
+                    pc_rate: self.built_rate,
+                    checked: observation.clone(),
+                });
                 if let Some(guide) = solve_guide(&mut self.solve, snapshot, show) {
                     return guide;
                 }
@@ -733,6 +762,7 @@ fn solve_guide(
         origin: Origin::Konbini,
         setup_complete: true,
         note: None,
+        pc_rate: session.pc_rate,
     })
 }
 
@@ -747,19 +777,6 @@ fn pc_pieces(
         .into_iter()
         .chain(snapshot.observed_queue_history.iter().copied())
         .collect()
-}
-
-/// Pieces dealt before Current since the game start, for the 7-bag. A
-/// perfect-clear loop deals 10 pieces per PC; the PC's pieces since then
-/// (HOLD at its start, then the queue) end with Current and NEXT5. Wrong
-/// after a resync in the middle of a PC, where the tracker misses the start;
-/// `bag_options` then usually sees a duplicate in a bag and assumes nothing.
-fn current_index(
-    tracker: &SessionTracker,
-    snapshot: &pc_overlay_core::tracker::Snapshot,
-) -> Option<usize> {
-    let before = 10 * usize::from(snapshot.pc_ordinal.get() - 1);
-    (before + pc_pieces(tracker, snapshot).len()).checked_sub(6)
 }
 
 /// The setups of the snapshot's PC that match the board and can be built
@@ -820,6 +837,7 @@ fn konbini_render(
             origin: Origin::Konbini,
             setup_complete: false,
             note: None,
+            pc_rate: None,
         };
     }
     let position = index.rem_euclid(candidates.len() as isize) as usize;
@@ -869,6 +887,7 @@ fn konbini_render(
         origin: Origin::Konbini,
         setup_complete: false,
         note: None,
+        pc_rate: setup.sol_percent,
     }
 }
 
@@ -922,6 +941,7 @@ fn build_overlay_state(
         ));
     }
 
+    let mut badge = String::new();
     let (status, cells) = if recognition.observation.is_none() {
         (
             "PC Overlay: recognition paused (unknown or unstable)".to_string(),
@@ -942,6 +962,9 @@ fn build_overlay_state(
                     detail.push_str(&format!("  guide={}", guide.origin.label()));
                     if let Some(note) = &guide.note {
                         detail.push_str(&format!(" ({note})"));
+                    }
+                    if let Some(rate) = guide.pc_rate {
+                        badge = format!("PC {rate:.2}%");
                     }
                     (guide.status, guide.cells)
                 }
@@ -973,6 +996,7 @@ fn build_overlay_state(
     OverlayState {
         status,
         detail,
+        badge,
         board: Some(board),
         cells,
     }
@@ -2098,7 +2122,7 @@ mod tests {
     }
 
     #[test]
-    fn a_100_percent_setup_is_solved_with_the_7th_piece_of_the_bag() {
+    fn perfect_clears_use_only_hold_current_and_next() {
         let library = konbini_library();
         let setup = library
             .setups
@@ -2109,10 +2133,9 @@ mod tests {
         for cell in &setup.cells {
             board[usize::from(cell.cell.y)][usize::from(cell.cell.x)] = cell.piece;
         }
-        // The 2nd PC's 4 setup pieces end the 2nd bag: Current is index 14.
         let mut finder = Finder::new();
-        let mut checked = 0;
-        // Each piece last, the rest in a fixed order: 7 orders of the bag.
+        let mut without = 0;
+        // Each piece of the bag left out, the rest shown in a fixed order.
         for last in pc_overlay_core::finder::ALL_PIECES {
             let first: Vec<Piece> = pc_overlay_core::finder::ALL_PIECES
                 .into_iter()
@@ -2124,16 +2147,46 @@ mod tests {
                 current: first[0],
                 next5: first[1..].try_into().unwrap(),
             };
-            assert!(
-                !konbini::find_perfect_clears(&mut finder, &observation, Some(14), 1).is_empty(),
-                "{first:?} then {last:?}"
-            );
-            if konbini::find_perfect_clears(&mut finder, &observation, None, 1).is_empty() {
-                checked += 1;
+            let solves = konbini::find_perfect_clears(&mut finder, &observation, SOLVE_LIMIT);
+            if solves.is_empty() {
+                without += 1;
+            }
+            for solve in &solves {
+                assert!(
+                    solve.steps.iter().all(|(piece, _)| *piece != last),
+                    "{first:?} solved with the unseen {last:?}"
+                );
+                assert!(solve.playable(&mut finder, &observation));
             }
         }
-        // Current and NEXT alone miss some of them, as before the fix.
-        assert!(checked > 0);
+        // The 6 pieces shown miss some orders; those wait for the 7th.
+        assert!(without > 0);
+    }
+
+    #[test]
+    fn a_solve_the_shown_pieces_cannot_finish_is_dropped() {
+        let mut mode = KonbiniGuide::new(PathBuf::from("unused"));
+        mode.library = Some(konbini_library());
+        let queue = [Piece::S, Piece::Z, Piece::I, Piece::T, Piece::L];
+        let tracker = tilj_setup_built(Some(Piece::J), Piece::O, queue);
+        let snapshot = tracker.snapshots().last().unwrap().clone();
+        let guide = mode.guide(&tracker, &snapshot);
+        assert!(guide.status.contains("perfect clear(s) found"));
+        assert_eq!(guide.pc_rate, mode.built_rate);
+        assert!(mode.built_rate.is_some());
+        // The same board with a HOLD and NEXT that hold none of the solve's
+        // pieces: no solve is left to show.
+        let mut other = snapshot.clone();
+        other.observation.hold = Some(Piece::O);
+        other.observation.current = Piece::O;
+        other.observation.next5 = [Piece::O; 5];
+        let guide = mode.guide(&tracker, &other);
+        assert!(mode.solve.is_none(), "{}", guide.status);
+        assert!(
+            !guide.status.contains("perfect clear 1/"),
+            "{}",
+            guide.status
+        );
     }
 
     #[test]
