@@ -468,7 +468,9 @@ cargo run --release --bin configure-overlay -- `
 ```
 
 TETR.IO の表示倍率やクライアントの配置が変わったら、キャリブレーションをやり直す。
-コマンドは `data/overlay-calibration.json` を書く。
+コマンドは `data/overlay-calibration.json` を書く。このファイルは画面ごとの設定なので
+Git では追跡しない（`.gitignore` 済み）。ファイルがなければ既定の 1920x1009 用の値を
+使う。書式は `data/overlay-calibration.example.json`（中身は既定値）を参照。
 
 オーバーレイと `run-live` はこのファイルを自動で読む。`--calibration PATH` で別の
 ファイルを選べる。`probe-recognition --bmp PATH` はオフラインの診断で、求めた盤面矩形と
