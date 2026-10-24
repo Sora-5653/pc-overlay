@@ -5,7 +5,8 @@
 //! included the border lines (194 px wide instead of the 192 px interior), so
 //! these tests also cover snapping to the visible border. `zen_pieces_150.bmp`
 //! is the same crop of a screenshot whose window had a 23 px title bar, with
-//! the overlay's guidance drawn over an empty board.
+//! the overlay's guidance drawn over an empty board. `zen_pieces_18/25/38.bmp`
+//! are the same crop of 1920x1080 ZEN recordings, taken at (740, 271).
 
 use std::path::Path;
 
@@ -170,6 +171,9 @@ fn reads_the_pieces_counter_left_of_the_board() {
         ("zen_000008.bmp", 20),
         ("zen_000010.bmp", 9),
         ("zen_pieces_150.bmp", 150),
+        ("zen_pieces_18.bmp", 18),
+        ("zen_pieces_25.bmp", 25),
+        ("zen_pieces_38.bmp", 38),
     ] {
         let result = recognizer.recognize(&load_fixture(name)).unwrap();
         assert_eq!(result.pieces_placed, Some(pieces), "{name}");
@@ -258,6 +262,9 @@ fn pieces_counter_follows_the_display_scale() {
         ("zen_000007.bmp", 16),
         ("zen_000008.bmp", 20),
         ("zen_pieces_150.bmp", 150),
+        ("zen_pieces_18.bmp", 18),
+        ("zen_pieces_25.bmp", 25),
+        ("zen_pieces_38.bmp", 38),
     ] {
         let frame = load_fixture(name);
         for scale in [0.75, 0.9, 1.25, 1.5, 2.0] {
