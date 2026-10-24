@@ -820,7 +820,7 @@ Hold は含めない。例 `OSITJLZ OIJLTZS OSJTZIL`）は全 CPU コアで約 1
     状態がそれに続けば、そこから追跡をやり直す。リセット直後に HOLD を押した場合は
     新しいゲームとする（[5 章](#5-pc-番号と解の表示)、`src/tracker.rs` と
     `src/bin/run_overlay.rs` で単体テスト）。自動テストのみで、TETR.IO では未確認。
-13. 完了（2026-10-24）: TETR.IO のリトライ・Undo・Redo のキーを押したことを追跡の
+17. 完了（2026-10-24）: TETR.IO のリトライ・Undo・Redo のキーを押したことを追跡の
     ヒントにし、リスタートと Undo を推測だけに頼らず見分ける。Undo は HOLD も戻すと
     実機で確かめたので、照合には HOLD も使う（[5 章](#5-pc-番号と解の表示)、`src/tracker.rs` で単体テスト）。自動テストのみで、
     TETR.IO では未確認。
