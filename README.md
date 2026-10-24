@@ -87,6 +87,10 @@ cargo build --release
 | `Ctrl+Alt+F` | Setup Konbini のデータを取り直す |
 | `Ctrl+Alt+1`〜`7` | 何回目の PC かを手で合わせる（数え間違えたとき） |
 
+TETR.IO のリトライ（`R`）、Undo（`Ctrl+Z`）、Redo（`Ctrl+Y`）を押すと、オーバーレイは
+それを手がかりに、リスタートと戻した状態を見分けます。リトライのキーを変えている
+ときは、`run-overlay --retry-key <キー>` で合わせてください。
+
 ## 現在の状態
 
 - 主な機能はそろっていて、Setup Konbini の形の表示は TETR.IO で試し、問題は

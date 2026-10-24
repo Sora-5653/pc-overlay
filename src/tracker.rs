@@ -11,6 +11,22 @@ use crate::{
 /// and rejecting it forever froze the guidance on an outdated state.
 pub const DISCONTINUITY_CONFIRM_MS: u64 = 500;
 
+/// How long after a game key is pressed the next change on screen is read as
+/// its result. The key is a hint: what the state became is still read from
+/// the screen, since a press does nothing when there is nothing to undo.
+pub const KEY_HINT_MS: u64 = 1500;
+
+/// A TETR.IO key the overlay sees pressed, passed to the tracker as a hint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GameKey {
+    /// `R` by default: restart the game.
+    Retry,
+    /// Ctrl+Z in ZEN: undo the last placement.
+    Undo,
+    /// Ctrl+Y in ZEN: redo an undone placement.
+    Redo,
+}
+
 /// HOLD plus the first playable pieces at a 2nd-PC start form a four-piece case.
 pub const SECOND_PC_CASE_SIZE: usize = 4;
 /// The 7th PC starts with three pieces left in the bag (60 placed = 8 bags + 4).
@@ -112,6 +128,8 @@ pub struct SessionTracker {
     /// The last state rejected as a discontinuity and when it was first
     /// seen, until it is confirmed or the history continues.
     unconfirmed: Option<(Observation, u64)>,
+    /// The last game key pressed and when, until a change is committed.
+    key_hint: Option<(GameKey, u64)>,
 }
 
 impl SessionTracker {
@@ -124,6 +142,7 @@ impl SessionTracker {
             guidance: GuidanceState::default(),
             history: Vec::new(),
             unconfirmed: None,
+            key_hint: None,
         }
     }
 
@@ -216,6 +235,24 @@ impl SessionTracker {
         self.guidance = GuidanceState::default();
         self.history.clear();
         self.unconfirmed = None;
+        self.key_hint = None;
+    }
+
+    /// Notes a game key pressed at `timestamp_ms` (the clock of the frames),
+    /// so the next change committed within `KEY_HINT_MS` is read as its result:
+    /// - Retry: an empty board is a new game, even with a HOLD already used.
+    /// - Undo: an earlier state is matched by its board and queue alone,
+    ///   whether or not TETR.IO restored HOLD, and even when the NEXT seems to
+    ///   continue (a 7-bag repeating a window).
+    /// - Redo: the state is never taken for an undo.
+    pub fn note_key(&mut self, key: GameKey, timestamp_ms: u64) {
+        self.key_hint = Some((key, timestamp_ms));
+    }
+
+    fn active_key(&self, timestamp_ms: u64) -> Option<GameKey> {
+        self.key_hint
+            .filter(|(_, at)| timestamp_ms.saturating_sub(*at) <= KEY_HINT_MS)
+            .map(|(key, _)| key)
     }
 
     /// Adopts the PC number derived from the game's own PIECES counter, as a
@@ -258,6 +295,7 @@ impl SessionTracker {
                 | CommitOutcome::RejectedHistoryDiscontinuity
         ) {
             self.unconfirmed = None;
+            self.key_hint = None;
         }
         outcome
     }
@@ -284,6 +322,11 @@ impl SessionTracker {
             return CommitOutcome::Unchanged;
         }
 
+        let key = self.active_key(timestamp_ms);
+        if key == Some(GameKey::Retry) && board_is_empty(&observation.board) {
+            return self.start_new_game(observation, recognition_confidence, timestamp_ms);
+        }
+
         if let Some(index) = self
             .history
             .iter()
@@ -303,7 +346,35 @@ impl SessionTracker {
             };
         }
 
-        if let Some((index, position)) = self.undo_target(&observation) {
+        if key == Some(GameKey::Undo)
+            && let Some(index) = self.history.iter().rposition(|snapshot| {
+                let seen = &snapshot.observation;
+                seen.board == observation.board
+                    && seen.current == observation.current
+                    && seen.next5 == observation.next5
+            })
+        {
+            // The same state but HOLD: TETR.IO kept or restored a different
+            // HOLD than the one tracked. The screen's HOLD is what holds now.
+            let steps = self.history.len() - 1 - index;
+            self.history.truncate(index + 1);
+            let target = self.history.last_mut().expect("rollback target exists");
+            target.observation = observation;
+            target.guidance.advance_solve_after_undo();
+            self.pc_ordinal = target.pc_ordinal;
+            self.observed_queue_history = target.observed_queue_history.clone();
+            self.game_queue.truncate(target.queue_end);
+            self.guidance = target.guidance.clone();
+            return CommitOutcome::RolledBack {
+                steps,
+                snapshot: target.clone(),
+            };
+        }
+
+        if key != Some(GameKey::Redo)
+            && let Some((index, position)) =
+                self.undo_target(&observation, key == Some(GameKey::Undo))
+        {
             return self.roll_back_to_unseen(
                 index,
                 position,
@@ -318,14 +389,7 @@ impl SessionTracker {
             .last()
             .is_some_and(|last| starts_new_game(&last.observation, &observation))
         {
-            // Undo never crosses a restart, so the old game's states are gone.
-            self.pc_ordinal = PcOrdinal::default();
-            self.observed_queue_history = seed_queue(&observation);
-            self.game_queue = seed_queue(&observation);
-            self.guidance = GuidanceState::default();
-            self.history.clear();
-            let snapshot = self.push_snapshot(observation, recognition_confidence, timestamp_ms);
-            return CommitOutcome::NewGame { snapshot };
+            return self.start_new_game(observation, recognition_confidence, timestamp_ms);
         }
 
         let crossed_pc_boundary = self.history.last().is_some_and(|last| {
@@ -380,6 +444,22 @@ impl SessionTracker {
         CommitOutcome::Accepted { snapshot }
     }
 
+    fn start_new_game(
+        &mut self,
+        observation: Observation,
+        recognition_confidence: f32,
+        timestamp_ms: u64,
+    ) -> CommitOutcome {
+        // Undo never crosses a restart, so the old game's states are gone.
+        self.pc_ordinal = PcOrdinal::default();
+        self.observed_queue_history = seed_queue(&observation);
+        self.game_queue = seed_queue(&observation);
+        self.guidance = GuidanceState::default();
+        self.history.clear();
+        let snapshot = self.push_snapshot(observation, recognition_confidence, timestamp_ms);
+        CommitOutcome::NewGame { snapshot }
+    }
+
     /// A state whose NEXT does not continue the latest snapshot's. It is
     /// rejected, so one misread cannot corrupt the queue history, until it is
     /// confirmed: the same state again `DISCONTINUITY_CONFIRM_MS` after it was
@@ -423,12 +503,16 @@ impl SessionTracker {
     /// window of the game queue, and the newest snapshot at or before that
     /// window is where the undone placements began. Returns that snapshot's
     /// index and the queue position the observation's NEXT5 ends at.
-    fn undo_target(&self, observation: &Observation) -> Option<(usize, usize)> {
+    /// `undo_pressed` (Ctrl+Z was seen) drops the two guards below that tell
+    /// an undo from other changes without the key.
+    fn undo_target(&self, observation: &Observation, undo_pressed: bool) -> Option<(usize, usize)> {
         let last = self.history.last()?;
         // One or two placements forward keep three or more NEXT pieces in
         // view. An undo matches all five pieces of an earlier window instead,
         // and a short forward overlap next to such a match is a coincidence.
-        if overlap(&last.observation.next5, &observation.next5).is_some_and(|size| size >= 3) {
+        if !undo_pressed
+            && overlap(&last.observation.next5, &observation.next5).is_some_and(|size| size >= 3)
+        {
             return None;
         }
         let earliest = self.history.first()?.queue_end;
@@ -440,8 +524,12 @@ impl SessionTracker {
             .iter()
             .rposition(|snapshot| snapshot.queue_end <= position)?;
         // HOLD never empties within a game, so an empty HOLD where the
-        // target had one is a restart, not an undo.
-        if observation.hold.is_none() && self.history[index].observation.hold.is_some() {
+        // target had one is a restart, not an undo; unless Ctrl+Z was
+        // pressed, since TETR.IO's undo may restore HOLD.
+        if !undo_pressed
+            && observation.hold.is_none()
+            && self.history[index].observation.hold.is_some()
+        {
             return None;
         }
         Some((index, position))
@@ -1233,6 +1321,120 @@ mod tests {
         // A counter one frame ahead of the tracked state does not align.
         assert_eq!(tracker.ordinal_from_pieces(8), None);
         assert_eq!(tracker.ordinal_from_pieces(1), None);
+    }
+
+    #[test]
+    fn undo_key_matches_a_state_by_board_and_queue_whatever_its_hold() {
+        let undone = || {
+            let mut undone = at(1, true);
+            undone.hold = None;
+            undone
+        };
+        let played = || {
+            let mut tracker = tracker();
+            tracker.commit(at(0, true), 1.0, 1);
+            tracker.commit(at(1, true), 1.0, 2);
+            tracker.commit(at(2, true), 1.0, 3);
+            tracker
+        };
+        // Without the key, an emptied HOLD reads as a restart.
+        let mut tracker = played();
+        assert!(matches!(
+            tracker.commit(undone(), 1.0, 10),
+            CommitOutcome::NewGame { .. }
+        ));
+
+        // With Ctrl+Z, it is the earlier state, with the HOLD now shown.
+        let mut tracker = played();
+        tracker.note_key(GameKey::Undo, 9);
+        match tracker.commit(undone(), 1.0, 10) {
+            CommitOutcome::RolledBack { steps, snapshot } => {
+                assert_eq!(steps, 1);
+                assert_eq!(snapshot.observation, undone());
+            }
+            other => panic!("expected a rollback, got {other:?}"),
+        }
+        assert_eq!(tracker.snapshots().len(), 2);
+    }
+
+    #[test]
+    fn undo_key_finds_an_unseen_state_even_with_an_emptied_hold() {
+        let mut tracker = tracker();
+        tracker.commit(at(0, true), 1.0, 1);
+        tracker.commit(at(3, true), 1.0, 2);
+        let mut undone = at(1, true);
+        undone.hold = None;
+        tracker.note_key(GameKey::Undo, 3);
+        assert_rolled_back(tracker.commit(undone, 1.0, 4), 1);
+        assert_eq!(tracker.observed_queue_history(), &QUEUE[..7]);
+    }
+
+    #[test]
+    fn retry_key_makes_an_empty_board_a_new_game_even_with_a_hold() {
+        // Restarted from PC 3, with HOLD pressed before the first stable
+        // frame: without the key the empty board reads as a PC.
+        let restarted = at(4, false);
+        let played = || {
+            let mut tracker = tracker();
+            tracker.resync(PcOrdinal::new(3).unwrap());
+            tracker.commit(at(0, true), 1.0, 1);
+            tracker
+        };
+        let mut tracker = played();
+        tracker.commit(restarted.clone(), 1.0, 10);
+        assert_eq!(tracker.pc_ordinal().get(), 4);
+
+        let mut tracker = played();
+        tracker.note_key(GameKey::Retry, 9);
+        assert!(matches!(
+            tracker.commit(restarted.clone(), 1.0, 10),
+            CommitOutcome::NewGame { .. }
+        ));
+        assert_eq!(tracker.pc_ordinal().get(), 1);
+
+        // A key pressed long before the change is no hint.
+        let mut tracker = played();
+        tracker.note_key(GameKey::Retry, 9);
+        tracker.commit(restarted, 1.0, 10 + KEY_HINT_MS);
+        assert_eq!(tracker.pc_ordinal().get(), 4);
+    }
+
+    #[test]
+    fn a_key_hint_applies_to_one_change_only() {
+        let mut tracker = tracker();
+        tracker.resync(PcOrdinal::new(3).unwrap());
+        tracker.commit(at(0, true), 1.0, 1);
+        tracker.note_key(GameKey::Retry, 2);
+        // Unchanged frames keep the hint; the placement uses it up.
+        assert_eq!(
+            tracker.commit(at(0, true), 1.0, 3),
+            CommitOutcome::Unchanged
+        );
+        assert!(matches!(
+            tracker.commit(at(1, true), 1.0, 4),
+            CommitOutcome::Accepted { .. }
+        ));
+        tracker.commit(at(2, false), 1.0, 5);
+        assert_eq!(tracker.pc_ordinal().get(), 4, "a PC, not a restart");
+    }
+
+    #[test]
+    fn redo_key_is_never_taken_for_an_undo() {
+        let played = || {
+            let mut tracker = tracker();
+            tracker.commit(at(0, true), 1.0, 1);
+            tracker.commit(at(3, true), 1.0, 2);
+            tracker
+        };
+        let mut tracker = played();
+        assert_rolled_back(tracker.commit(at(1, true), 1.0, 3), 1);
+
+        let mut tracker = played();
+        tracker.note_key(GameKey::Redo, 2);
+        assert_eq!(
+            tracker.commit(at(1, true), 1.0, 3),
+            CommitOutcome::RejectedHistoryDiscontinuity
+        );
     }
 
     #[test]

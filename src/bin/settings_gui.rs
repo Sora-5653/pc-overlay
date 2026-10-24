@@ -28,7 +28,8 @@ Ctrl+Alt+S  -  show / hide the solve
 Ctrl+Alt+N / B  -  next / previous setup (or solve, once found)
 Ctrl+Alt+K  -  2nd PC: use Setup Konbini instead of the source rules
 Ctrl+Alt+F  -  download the Setup Konbini sheets again
-Ctrl+Alt+1..7  -  set the PC number (if it was miscounted)";
+Ctrl+Alt+1..7  -  set the PC number (if it was miscounted)
+R / Ctrl+Z / Ctrl+Y  -  TETR.IO's retry / undo / redo, read as hints (run-overlay --retry-key for another retry key)";
 
 /// Paths the overlay reads, relative to the working directory.
 struct DataPaths {
