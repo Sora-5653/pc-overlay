@@ -170,7 +170,7 @@ mod tests {
     fn ordinal_at_pc_start_follows_the_bag_position() {
         let at = |pieces| PcOrdinal::at_pc_start(pieces).map(PcOrdinal::get);
         // Every 10-piece PC start agrees with the 10-per-PC count.
-        for pieces in (0..140).step_by(10) {
+        for pieces in (0..210).step_by(10) {
             assert_eq!(
                 at(pieces),
                 Some(PcOrdinal::from_pieces_placed(pieces).get())
