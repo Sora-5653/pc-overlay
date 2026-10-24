@@ -34,15 +34,21 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from diagrams import SOURCE, load_images, transcribe  # noqa: E402
 from srs import SHAPES  # noqa: E402
 from srs import reachable as _reachable  # noqa: E402
+from srs import reachable_plus as _reachable_plus  # noqa: E402
 
 
 @lru_cache(maxsize=None)
-def _cached_reachable(piece, board, target):
-    return _reachable(piece, set(board), list(target))
+def _cached_reachable(piece, board, target, plus=False):
+    return (_reachable_plus if plus else _reachable)(piece, set(board), list(target))
 
 
 def reachable(piece, board, target):
     return _cached_reachable(piece, frozenset(board), frozenset(target))
+
+
+def reachable_plus(piece, board, target):
+    """TETR.IO's SRS+, with 180-degree rotation (src/finder.rs)."""
+    return _cached_reachable(piece, frozenset(board), frozenset(target), True)
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # (document, style): the 2nd PC methods, the odd-JL no-T 2nd PCs those leave
@@ -519,11 +525,11 @@ def reachable_order(setup, solve):
     return build(frozenset())
 
 
-def transitions(base, movable, first=0):
+def transitions(base, movable, first=0, reach=reachable):
     """{placed mask: mask of `movable` pieces placeable next}, over the states
     reachable with `base` already on the board. Bit i is movable[i]; the
     first `first` pieces (setup pieces from the following bag) must all be
-    placed before any other."""
+    placed before any other. `reach` decides a single placement."""
     pieces = base + movable
     height = max(y for _, cells in pieces for _, y in cells) + 1
     must = (1 << first) - 1
@@ -544,7 +550,7 @@ def transitions(base, movable, first=0):
             if i >= first and mask & must != must:
                 continue
             moved = [(x, y - sum(1 for r in cleared if r < y)) for x, y in part]
-            if reachable(piece, live, moved):
+            if reach(piece, live, moved):
                 allowed |= 1 << i
                 stack.append(mask | 1 << i)
         table[mask] = allowed
@@ -561,16 +567,20 @@ def playable_solve(cond, solve, queue_from_case, hold, bag):
     base = "".join(cond.get("setup", []))
     in_table = solve.get("setup_in_table", False)
     if queue_from_case is not None:
-        return playable(queue_from_case + bag, pieces, table, hold, "" if in_table else base)
+        if in_table:
+            return playable(queue_from_case + bag, pieces, table, hold)
+        order = {m: a for m, a in cond.get("setup_order", [])}
+        return playable(queue_from_case + bag, pieces, table, hold, base, order)
     lead = (base + prefix) if in_table else prefix
     return playable(lead + bag, pieces, table)
 
 
-def playable(queue, solve_pieces, table, start_hold=None, base=""):
+def playable(queue, solve_pieces, table, start_hold=None, base="", base_order=None):
     """Mirrors Rust `Replay`: place Current, hold it into an empty HOLD
     (locked until the next placement), or swap by placing the held piece.
-    `base` pieces (the setup's case pieces) go first in any order; solve
-    pieces then follow the SRS table. Bits 0.. are solve pieces, then base."""
+    `base` pieces (the setup's case pieces) go first, in an order their SRS
+    table `base_order` allows (any order without one); solve pieces then
+    follow the solve's SRS table. Bits 0.. are solve pieces, then base."""
     n = len(solve_pieces)
     pieces = list(solve_pieces) + list(base)
     goal = (1 << len(pieces)) - 1
@@ -578,6 +588,8 @@ def playable(queue, solve_pieces, table, start_hold=None, base=""):
 
     def allowed(mask):
         if mask & base_mask != base_mask:
+            if base_order:
+                return base_order.get(mask >> n, 0) << n
             return ~mask & base_mask
         return table.get(mask & ((1 << n) - 1), 0)
 
@@ -764,6 +776,10 @@ def rule_sets(cases):
                             "pieces": [p for p, _ in movable],
                             "transitions": [[m, a] for m, a in sorted(table.items())],
                         })
+            # The case pieces of the setup, in the orders TETR.IO's SRS+ can
+            # place them on the empty board the PC starts with (L on top of
+            # Z needs Z first; a J tucked under S may need a 180 spin).
+            setup_order = transitions([], base, reach=reachable_plus) if base else {}
             verified_setup = bool(conds) and not setup.problems
             setup_id = f"{case_id.lower()}_{setup.image}{'_m' if mirrored else ''}"
             stages = getattr(setup, "image_stages", [setup.image])
@@ -781,7 +797,9 @@ def rule_sets(cases):
                 "setup_piece_count": len(setup_geo),
                 "review_status": "verified" if verified_setup else "review_required",
                 "build_condition": {"op": "solvable", "prefix": list(left),
-                                    "setup": [p for p, _ in base], "solves": conds},
+                                    "setup": [p for p, _ in base],
+                                    "setup_order": [[m, a] for m, a in sorted(setup_order.items())],
+                                    "solves": conds},
                 "placements": [placement_json(p, c) for p, c in setup_geo],
                 "solves": solves_json,
                 "source": {"document": entry["document"],

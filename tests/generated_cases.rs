@@ -10,8 +10,10 @@
 use std::collections::BTreeMap;
 use std::fs;
 
+use pc_overlay_core::condition::Condition;
+use pc_overlay_core::finder::{self, Mask};
 use pc_overlay_core::rules::{ReviewStatus, RuleSet, SetupRule};
-use pc_overlay_core::{EvalContext, EvalResult, Piece};
+use pc_overlay_core::{EvalContext, EvalResult, Piece, Placement};
 
 const PIECES: [Piece; 7] = [
     Piece::I,
@@ -182,4 +184,140 @@ fn solvable_is_pending_until_the_completions_agree() {
         case_queue: Vec::new(),
     };
     assert_eq!(setup.build_condition.evaluate(&open), EvalResult::Pending);
+}
+
+/// The setup's case pieces as build_cases.py splits them: by lowest row,
+/// the first placements whose piece the condition's `setup` still lists.
+fn case_placements<'a>(setup: &'a SetupRule, pieces: &[Piece]) -> Vec<&'a Placement> {
+    let mut left = pieces.to_vec();
+    let mut placements: Vec<&Placement> = setup.placements.iter().collect();
+    placements.sort_by_key(|placement| placement.cells.iter().map(|cell| cell.y).min());
+    placements
+        .into_iter()
+        .filter(|placement| {
+            left.iter()
+                .position(|piece| *piece == placement.piece)
+                .map(|index| left.remove(index))
+                .is_some()
+        })
+        .collect()
+}
+
+/// `[placed, allowed]` for `placements` on an empty board with SRS+
+/// movement (90 and 180-degree kicks), from the Rust move generator.
+fn srs_plus_order(placements: &[&Placement]) -> Vec<(u32, u32)> {
+    let masks: Vec<Mask> = placements
+        .iter()
+        .map(|placement| {
+            placement
+                .cells
+                .iter()
+                .map(|cell| finder::bit(cell.x, cell.y))
+                .fold(0, |mask, bit| mask | bit)
+        })
+        .collect();
+    let mut table = BTreeMap::new();
+    let mut stack = vec![0u32];
+    while let Some(placed) = stack.pop() {
+        if table.contains_key(&placed) {
+            continue;
+        }
+        let field = (0..masks.len())
+            .filter(|i| placed >> i & 1 == 1)
+            .fold(0, |field, i| field | masks[i]);
+        let mut allowed = 0;
+        for (i, placement) in placements.iter().enumerate() {
+            if placed >> i & 1 == 0
+                && finder::lockable_placements(field, placement.piece).contains(&masks[i])
+            {
+                allowed |= 1 << i;
+                stack.push(placed | 1 << i);
+            }
+        }
+        table.insert(placed, allowed);
+    }
+    table.into_iter().collect()
+}
+
+#[test]
+fn setup_orders_agree_with_srs_plus() {
+    // build_cases.py derives `setup_order` with tools/srs.py's SRS+; the Rust
+    // move generator models it independently. Every order must agree.
+    let (mut checked, mut clearing) = (0, 0);
+    let mut mismatches = Vec::new();
+    for (case_id, rules) in load_cases() {
+        for setup in rules.methods.iter().flat_map(|method| &method.setups) {
+            let Condition::Solvable {
+                setup: pieces,
+                setup_order,
+                ..
+            } = &setup.build_condition
+            else {
+                continue;
+            };
+            if pieces.is_empty() {
+                continue;
+            }
+            let placements = case_placements(setup, pieces);
+            assert_eq!(placements.len(), pieces.len(), "{case_id}/{}", setup.id);
+            // A row the case pieces fill alone clears; the move generator
+            // here does not model that, so such setups are left out.
+            let rows = placements
+                .iter()
+                .flat_map(|placement| &placement.cells)
+                .fold([0u8; 8], |mut rows, cell| {
+                    rows[usize::from(cell.y)] += 1;
+                    rows
+                });
+            if rows.contains(&10) {
+                clearing += 1;
+                continue;
+            }
+            checked += 1;
+            if srs_plus_order(&placements) != *setup_order {
+                mismatches.push(format!("{case_id}/{}", setup.id));
+            }
+        }
+    }
+    assert!(
+        checked > 300,
+        "only {checked} setups ({clearing} clear a row)"
+    );
+    assert!(mismatches.is_empty(), "{mismatches:#?}");
+}
+
+/// The ILSZ start of the PIECES 150 screenshot: HOLD S, Current I, NEXT
+/// L Z L Z S. The case pieces in the queue are I L Z, the bag after them
+/// starts L Z S.
+fn ilsz_start(case_queue: &str) -> EvalContext {
+    let queue = pieces(&format!("{case_queue}LZS"));
+    EvalContext::for_following_bag(&queue, 3, Some(Piece::S), queue[0])
+        .with_case(Some(Piece::S), &queue[..3])
+}
+
+fn ilsz_setup<'a>(cases: &'a BTreeMap<String, RuleSet>, id: &str) -> &'a SetupRule {
+    cases["ILSZ"]
+        .methods
+        .iter()
+        .flat_map(|method| &method.setups)
+        .find(|setup| setup.id == id)
+        .unwrap()
+}
+
+#[test]
+fn a_setup_piece_waits_for_the_pieces_under_it() {
+    let cases = load_cases();
+    // ilsz_image69_m stacks L on Z and S. With S held and I L Z to come,
+    // S goes in by swapping I into HOLD; L then arrives before Z and could
+    // only be held by placing that I first.
+    let setup = ilsz_setup(&cases, "ilsz_image69_m");
+    assert_eq!(
+        setup.build_condition.evaluate(&ilsz_start("ILZ")),
+        EvalResult::Failed
+    );
+    // With Z before L the same setup can be built.
+    assert_ne!(
+        setup.build_condition.evaluate(&ilsz_start("IZL")),
+        EvalResult::Failed
+    );
 }
