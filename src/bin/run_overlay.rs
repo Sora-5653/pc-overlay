@@ -161,6 +161,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                     stability.clear_pending();
                     None
                 };
+                let previous_next = tracker
+                    .snapshots()
+                    .last()
+                    .map(|snapshot| snapshot.observation.next5);
                 let commit = match stable.as_ref() {
                     Some(pc_overlay_core::StabilityOutcome::Stable {
                         observation,
@@ -172,6 +176,14 @@ fn main() -> Result<(), Box<dyn Error>> {
                     )),
                     _ => None,
                 };
+                if let (Some(CommitOutcome::Resynced { snapshot }), Some(previous)) =
+                    (&commit, previous_next)
+                {
+                    eprintln!(
+                        "tracking restarted from this state: NEXT {:?} did not continue {previous:?}",
+                        snapshot.observation.next5
+                    );
+                }
                 // The PIECES counter, when shown, decides the PC number; the
                 // tracker's own count is the fallback when it is unreadable.
                 let pieces = pieces_reading.confirm(recognition.pieces_placed);
@@ -1672,6 +1684,7 @@ fn commit_name(commit: &CommitOutcome) -> &'static str {
         CommitOutcome::RejectedHistoryDiscontinuity => "history_discontinuity",
         CommitOutcome::RolledBack { .. } => "rolled_back",
         CommitOutcome::NewGame { .. } => "new_game",
+        CommitOutcome::Resynced { .. } => "resynced",
     }
 }
 
@@ -2578,6 +2591,81 @@ mod tests {
             CommitOutcome::Accepted { .. }
         ));
         tracker
+    }
+
+    #[test]
+    fn a_setup_built_across_a_history_discontinuity_gets_its_solve() {
+        let library = konbini_library();
+        let setup = library
+            .setups
+            .iter()
+            .find(|setup| setup.sol_percent == Some(100.0))
+            .unwrap();
+        let mut mode = KonbiniGuide::new(PathBuf::from("unused"));
+        mode.library = Some(library.clone());
+        let mut tracker = tilj_pc_two();
+        // The first HOLD, so a NEXT that does not continue is not a restart.
+        assert!(matches!(
+            tracker.commit(
+                observation(
+                    Some(Piece::T),
+                    Piece::I,
+                    [Piece::L, Piece::J, Piece::O, Piece::S, Piece::I],
+                ),
+                0.75,
+                3,
+            ),
+            CommitOutcome::Accepted { .. }
+        ));
+        // The setup is built, but its NEXT does not continue the last state
+        // (a misread there, or frames the tracker never saw).
+        let mut built = observation(
+            Some(Piece::J),
+            Piece::O,
+            [Piece::S, Piece::Z, Piece::I, Piece::T, Piece::L],
+        );
+        for cell in &setup.cells {
+            built.board[usize::from(cell.cell.y)][usize::from(cell.cell.x)] = cell.piece;
+        }
+        assert_eq!(
+            tracker.commit(built.clone(), 0.75, 10),
+            CommitOutcome::RejectedHistoryDiscontinuity
+        );
+        // While rejected, the guidance is that of the last tracked state, so
+        // S was refused as "setup not complete" for as long as it lasted.
+        let stale = tracker.snapshots().last().unwrap().clone();
+        assert!(!mode.guide(&tracker, &stale).setup_complete);
+        assert_eq!(
+            apply_solve_hotkey(&mut tracker, SolveHotkey::Show, false),
+            Some("solve hotkey ignored: setup not complete")
+        );
+
+        // Staying on screen confirms it: tracking starts over from it.
+        let outcome = tracker.commit(
+            built.clone(),
+            0.75,
+            10 + pc_overlay_core::tracker::DISCONTINUITY_CONFIRM_MS,
+        );
+        assert!(
+            matches!(outcome, CommitOutcome::Resynced { .. }),
+            "{outcome:?}"
+        );
+        assert_eq!(tracker.pc_ordinal().get(), 2);
+        let snapshot = tracker.snapshots().last().unwrap().clone();
+        assert_eq!(snapshot.observation, built);
+        let guide = mode.guide(&tracker, &snapshot);
+        assert!(guide.setup_complete, "{}", guide.status);
+        assert_eq!(
+            apply_solve_hotkey(&mut tracker, SolveHotkey::Show, guide.setup_complete),
+            Some("solve shown")
+        );
+        let guide = mode.guide(&tracker, &snapshot);
+        assert!(
+            guide.status.contains("perfect clear 1/"),
+            "{}",
+            guide.status
+        );
+        assert_eq!(guide.cells.len(), 24);
     }
 
     #[test]

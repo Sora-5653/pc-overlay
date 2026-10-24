@@ -5,6 +5,12 @@ use crate::{
     model::{Observation, PcOrdinal, Piece, board_is_empty},
 };
 
+/// How long a state whose NEXT does not continue the tracked history must
+/// stay on screen before the tracker starts over from it. A misread that
+/// passed the stability filter rarely lasts this long; a real state does,
+/// and rejecting it forever froze the guidance on an outdated state.
+pub const DISCONTINUITY_CONFIRM_MS: u64 = 500;
+
 /// HOLD plus the first playable pieces at a 2nd-PC start form a four-piece case.
 pub const SECOND_PC_CASE_SIZE: usize = 4;
 /// The 7th PC starts with three pieces left in the bag (60 placed = 8 bags + 4).
@@ -84,6 +90,13 @@ pub enum CommitOutcome {
     NewGame {
         snapshot: Snapshot,
     },
+    /// A state that does not continue the history was confirmed, by staying
+    /// for `DISCONTINUITY_CONFIRM_MS` or by a next state that continues it.
+    /// The tracker starts over from it with the same PC number, like a
+    /// resync: Undo cannot go back past it.
+    Resynced {
+        snapshot: Snapshot,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -96,6 +109,9 @@ pub struct SessionTracker {
     game_queue: Vec<Piece>,
     guidance: GuidanceState,
     history: Vec<Snapshot>,
+    /// The last state rejected as a discontinuity and when it was first
+    /// seen, until it is confirmed or the history continues.
+    unconfirmed: Option<(Observation, u64)>,
 }
 
 impl SessionTracker {
@@ -107,6 +123,7 @@ impl SessionTracker {
             game_queue: Vec::new(),
             guidance: GuidanceState::default(),
             history: Vec::new(),
+            unconfirmed: None,
         }
     }
 
@@ -198,6 +215,7 @@ impl SessionTracker {
         self.game_queue.clear();
         self.guidance = GuidanceState::default();
         self.history.clear();
+        self.unconfirmed = None;
     }
 
     /// Adopts the PC number derived from the game's own PIECES counter, as a
@@ -227,6 +245,24 @@ impl SessionTracker {
     }
 
     pub fn commit(
+        &mut self,
+        observation: Observation,
+        recognition_confidence: f32,
+        timestamp_ms: u64,
+    ) -> CommitOutcome {
+        let outcome = self.advance(observation, recognition_confidence, timestamp_ms);
+        if !matches!(
+            outcome,
+            CommitOutcome::Unchanged
+                | CommitOutcome::IgnoredLowConfidence { .. }
+                | CommitOutcome::RejectedHistoryDiscontinuity
+        ) {
+            self.unconfirmed = None;
+        }
+        outcome
+    }
+
+    fn advance(
         &mut self,
         observation: Observation,
         recognition_confidence: f32,
@@ -326,7 +362,11 @@ impl SessionTracker {
                 &last.observation.next5,
                 &observation.next5,
             ) else {
-                return CommitOutcome::RejectedHistoryDiscontinuity;
+                return self.reject_discontinuity(
+                    observation,
+                    recognition_confidence,
+                    timestamp_ms,
+                );
             };
             self.game_queue
                 .extend_from_slice(&updated[self.observed_queue_history.len()..]);
@@ -338,6 +378,44 @@ impl SessionTracker {
 
         let snapshot = self.push_snapshot(observation, recognition_confidence, timestamp_ms);
         CommitOutcome::Accepted { snapshot }
+    }
+
+    /// A state whose NEXT does not continue the latest snapshot's. It is
+    /// rejected, so one misread cannot corrupt the queue history, until it is
+    /// confirmed: the same state again `DISCONTINUITY_CONFIRM_MS` after it was
+    /// first rejected, or a state whose NEXT continues the rejected one. Then
+    /// the history is what was wrong (a restart or an Undo the checks above
+    /// miss, or an earlier misread that was accepted), and the tracker starts
+    /// over from the confirmed state with the same PC number.
+    fn reject_discontinuity(
+        &mut self,
+        observation: Observation,
+        recognition_confidence: f32,
+        timestamp_ms: u64,
+    ) -> CommitOutcome {
+        let confirmed = self.unconfirmed.as_ref().is_some_and(|(seen, since)| {
+            if *seen == observation {
+                timestamp_ms.saturating_sub(*since) >= DISCONTINUITY_CONFIRM_MS
+            } else {
+                overlap(&seen.next5, &observation.next5).is_some()
+            }
+        });
+        if !confirmed {
+            if self
+                .unconfirmed
+                .as_ref()
+                .is_none_or(|(seen, _)| *seen != observation)
+            {
+                self.unconfirmed = Some((observation, timestamp_ms));
+            }
+            return CommitOutcome::RejectedHistoryDiscontinuity;
+        }
+        self.observed_queue_history = seed_queue(&observation);
+        self.game_queue = seed_queue(&observation);
+        self.guidance = GuidanceState::default();
+        self.history.clear();
+        let snapshot = self.push_snapshot(observation, recognition_confidence, timestamp_ms);
+        CommitOutcome::Resynced { snapshot }
     }
 
     /// Undo to a state that never became stable, such as one the player left
@@ -453,13 +531,15 @@ impl SessionTracker {
 /// A restarted game (`R` in ZEN) is told from a PC by HOLD, not by the board:
 /// once filled, HOLD never empties within a game, while a restart empties it.
 /// Before the first hold, a NEXT queue that does not continue the previous
-/// one is a restart too; such a state is in PC 1, so a false positive from
-/// skipped frames there costs nothing. Undo to an earlier state of the same
+/// one is a restart too, with or without a HOLD now: the first state of a
+/// restart can show one already, when HOLD was pressed before it became
+/// stable (or during the countdown). Such a state is in PC 1, so a false
+/// positive from skipped frames there costs nothing. Undo to an earlier state of the same
 /// game is matched by the rollback before this check.
 fn starts_new_game(previous: &Observation, observation: &Observation) -> bool {
-    observation.hold.is_none()
-        && (previous.hold.is_some()
-            || append_revealed(&[], &previous.next5, &observation.next5).is_none())
+    let continues = overlap(&previous.next5, &observation.next5).is_some();
+    (observation.hold.is_none() && previous.hold.is_some())
+        || (previous.hold.is_none() && !continues)
 }
 
 fn seed_queue(observation: &Observation) -> Vec<Piece> {
@@ -827,6 +907,137 @@ mod tests {
             CommitOutcome::NewGame { .. }
         ));
         assert_eq!(tracker.pc_ordinal().get(), 1);
+    }
+
+    #[test]
+    fn restart_with_a_hold_before_its_first_stable_state_is_a_new_game() {
+        let mut tracker = tracker();
+        tracker.resync(PcOrdinal::new(3).unwrap());
+        let mut start = observation(
+            false,
+            Piece::I,
+            [Piece::J, Piece::L, Piece::O, Piece::S, Piece::T],
+        );
+        start.hold = None;
+        tracker.commit(start, 1.0, 1);
+        // Restarted and HOLD pressed at once: the first stable state of the
+        // new game already has a HOLD, and its queue does not continue.
+        // Previously rejected as a discontinuity, which froze the guidance
+        // on the old game's start.
+        let restarted = observation(
+            false,
+            Piece::T,
+            [Piece::S, Piece::Z, Piece::I, Piece::O, Piece::L],
+        );
+        assert!(matches!(
+            tracker.commit(restarted, 1.0, 2),
+            CommitOutcome::NewGame { .. }
+        ));
+        assert_eq!(tracker.pc_ordinal().get(), 1);
+    }
+
+    /// A tracker in PC 3 whose latest state has a HOLD, and a state that
+    /// does not continue it.
+    fn tracker_before_a_discontinuity() -> (SessionTracker, Observation) {
+        let mut tracker = tracker();
+        tracker.resync(PcOrdinal::new(3).unwrap());
+        tracker.commit(
+            observation(
+                true,
+                Piece::I,
+                [Piece::J, Piece::L, Piece::O, Piece::S, Piece::T],
+            ),
+            1.0,
+            1,
+        );
+        let jump = observation(
+            true,
+            Piece::Z,
+            [Piece::I, Piece::O, Piece::L, Piece::J, Piece::Z],
+        );
+        (tracker, jump)
+    }
+
+    #[test]
+    fn a_discontinuity_that_stays_on_screen_restarts_tracking_from_it() {
+        let (mut tracker, jump) = tracker_before_a_discontinuity();
+        assert_eq!(
+            tracker.commit(jump.clone(), 1.0, 10),
+            CommitOutcome::RejectedHistoryDiscontinuity
+        );
+        assert_eq!(
+            tracker.commit(jump.clone(), 1.0, 10 + DISCONTINUITY_CONFIRM_MS - 1),
+            CommitOutcome::RejectedHistoryDiscontinuity
+        );
+        let outcome = tracker.commit(jump.clone(), 1.0, 10 + DISCONTINUITY_CONFIRM_MS);
+        assert!(
+            matches!(&outcome, CommitOutcome::Resynced { snapshot } if snapshot.observation == jump),
+            "{outcome:?}"
+        );
+        assert_eq!(tracker.pc_ordinal().get(), 3);
+        assert_eq!(tracker.snapshots().len(), 1);
+        assert_eq!(tracker.observed_queue_history().len(), 6);
+        // Later states continue from it.
+        assert!(matches!(
+            tracker.commit(
+                observation(
+                    true,
+                    Piece::I,
+                    [Piece::O, Piece::L, Piece::J, Piece::Z, Piece::T],
+                ),
+                1.0,
+                1000,
+            ),
+            CommitOutcome::Accepted { .. }
+        ));
+    }
+
+    #[test]
+    fn a_next_state_continuing_a_rejected_one_confirms_it() {
+        let (mut tracker, jump) = tracker_before_a_discontinuity();
+        assert_eq!(
+            tracker.commit(jump, 1.0, 10),
+            CommitOutcome::RejectedHistoryDiscontinuity
+        );
+        let placed = observation(
+            true,
+            Piece::I,
+            [Piece::O, Piece::L, Piece::J, Piece::Z, Piece::T],
+        );
+        let outcome = tracker.commit(placed.clone(), 1.0, 20);
+        assert!(
+            matches!(&outcome, CommitOutcome::Resynced { snapshot } if snapshot.observation == placed),
+            "{outcome:?}"
+        );
+        assert_eq!(tracker.pc_ordinal().get(), 3);
+    }
+
+    #[test]
+    fn a_short_misread_is_still_rejected() {
+        let (mut tracker, jump) = tracker_before_a_discontinuity();
+        assert_eq!(
+            tracker.commit(jump.clone(), 1.0, 10),
+            CommitOutcome::RejectedHistoryDiscontinuity
+        );
+        // The history continues, so the misread is dropped...
+        assert!(matches!(
+            tracker.commit(
+                observation(
+                    true,
+                    Piece::J,
+                    [Piece::L, Piece::O, Piece::S, Piece::T, Piece::Z],
+                ),
+                1.0,
+                20,
+            ),
+            CommitOutcome::Accepted { .. }
+        ));
+        // ...and seen again later it waits for confirmation afresh.
+        assert_eq!(
+            tracker.commit(jump, 1.0, 10 + DISCONTINUITY_CONFIRM_MS),
+            CommitOutcome::RejectedHistoryDiscontinuity
+        );
+        assert_eq!(tracker.snapshots().len(), 2);
     }
 
     #[test]
