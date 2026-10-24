@@ -178,6 +178,32 @@ impl SessionTracker {
         self.history.clear();
     }
 
+    /// Adopts the PC number derived from the game's own PIECES counter, as a
+    /// second source next to the empty-board boundaries counted by `commit`.
+    /// Unlike `resync` it keeps the history: the snapshots of the current PC
+    /// are relabeled, so Undo and the PC start stay usable. Returns whether
+    /// the number changed.
+    pub fn align_pc_ordinal(&mut self, ordinal: PcOrdinal) -> bool {
+        if ordinal == self.pc_ordinal {
+            return false;
+        }
+        let start = self
+            .history
+            .iter()
+            .rposition(|snapshot| snapshot.pc_ordinal != self.pc_ordinal)
+            .map_or(0, |index| index + 1);
+        self.pc_ordinal = ordinal;
+        // Guidance chosen for the wrong PC does not carry over.
+        self.guidance = GuidanceState::default();
+        for snapshot in &mut self.history[start..] {
+            snapshot.pc_ordinal = ordinal;
+        }
+        if let Some(last) = self.history.last_mut() {
+            last.guidance = GuidanceState::default();
+        }
+        true
+    }
+
     pub fn commit(
         &mut self,
         observation: Observation,
@@ -516,6 +542,41 @@ mod tests {
             !tracker.guidance().show_solve,
             "turned OFF by a manual resync"
         );
+    }
+
+    #[test]
+    fn aligning_the_ordinal_relabels_the_current_pc_and_keeps_undo() {
+        let mut tracker = tracker();
+        let first = observation(
+            true,
+            Piece::I,
+            [Piece::J, Piece::L, Piece::O, Piece::S, Piece::T],
+        );
+        let second = observation(
+            true,
+            Piece::J,
+            [Piece::L, Piece::O, Piece::S, Piece::T, Piece::Z],
+        );
+        tracker.commit(first.clone(), 1.0, 1);
+        tracker.commit(second, 1.0, 2);
+
+        assert!(!tracker.align_pc_ordinal(PcOrdinal::default()));
+        assert!(tracker.align_pc_ordinal(PcOrdinal::new(3).unwrap()));
+        assert_eq!(tracker.pc_ordinal().get(), 3);
+        assert!(
+            tracker
+                .snapshots()
+                .iter()
+                .all(|snapshot| snapshot.pc_ordinal.get() == 3)
+        );
+        assert_eq!(tracker.current_pc_start().unwrap().timestamp_ms, 1);
+
+        // Undo still finds the earlier state, now labeled with the new PC.
+        assert!(matches!(
+            tracker.commit(first, 1.0, 3),
+            CommitOutcome::RolledBack { steps: 1, .. }
+        ));
+        assert_eq!(tracker.pc_ordinal().get(), 3);
     }
 
     #[test]

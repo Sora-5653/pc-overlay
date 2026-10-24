@@ -76,6 +76,21 @@ impl WindowLocator {
     }
 }
 
+/// The window with keyboard focus, in the form of `WindowInfo::handle`, or
+/// `None` when no window has it (or off Windows).
+pub fn foreground_handle() -> Option<u64> {
+    #[cfg(windows)]
+    {
+        // SAFETY: GetForegroundWindow takes no arguments; null means none.
+        let hwnd = unsafe { windows_sys::Win32::UI::WindowsAndMessaging::GetForegroundWindow() };
+        (!hwnd.is_null()).then_some(hwnd as usize as u64)
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
+
 pub fn is_tetrio_title(title: &str) -> bool {
     title.to_ascii_lowercase().contains("tetr.io")
 }

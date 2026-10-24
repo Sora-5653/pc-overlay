@@ -158,3 +158,76 @@ fn all_clear_banner_pauses_recognition() {
     assert!(result.observation.is_none());
     assert_eq!(result.current, Some(Piece::T));
 }
+
+#[test]
+fn reads_the_pieces_counter_left_of_the_board() {
+    let recognizer = recognizer();
+    for (name, pieces) in [
+        ("zen_000005.bmp", 7),
+        ("zen_000007.bmp", 16),
+        ("zen_000008.bmp", 20),
+        ("zen_000010.bmp", 9),
+    ] {
+        let result = recognizer.recognize(&load_fixture(name)).unwrap();
+        assert_eq!(result.pieces_placed, Some(pieces), "{name}");
+    }
+}
+
+#[test]
+fn pieces_counter_needs_its_label() {
+    // Blank the "PIECES" label: the ATTACK line below must not stand in.
+    let mut frame = load_fixture("zen_000007.bmp");
+    for y in CROP_TOP + 374..CROP_TOP + 389 {
+        for x in CROP_LEFT + 78..CROP_LEFT + 120 {
+            let index = ((y * FRAME_WIDTH + x) * 4) as usize;
+            frame.rgba[index..index + 3].fill(0);
+        }
+    }
+    let result = recognizer().recognize(&frame).unwrap();
+    assert_eq!(result.pieces_placed, None);
+}
+
+/// Bilinear resize, standing in for TETR.IO drawing the board and its
+/// statistics at another display scale.
+fn rescale(frame: &CapturedFrame, scale: f32) -> CapturedFrame {
+    let width = (frame.width as f32 * scale).round() as u32;
+    let height = (frame.height as f32 * scale).round() as u32;
+    let source = |x: u32, y: u32, channel: usize| {
+        f32::from(frame.rgba[((y * frame.width + x) * 4) as usize + channel])
+    };
+    let mut rgba = vec![255u8; (width * height * 4) as usize];
+    for y in 0..height {
+        let sy = ((y as f32 + 0.5) / scale - 0.5).clamp(0.0, (frame.height - 1) as f32);
+        let (y0, fy) = (sy.floor() as u32, sy.fract());
+        let y1 = (y0 + 1).min(frame.height - 1);
+        for x in 0..width {
+            let sx = ((x as f32 + 0.5) / scale - 0.5).clamp(0.0, (frame.width - 1) as f32);
+            let (x0, fx) = (sx.floor() as u32, sx.fract());
+            let x1 = (x0 + 1).min(frame.width - 1);
+            for channel in 0..3 {
+                let top = source(x0, y0, channel) * (1.0 - fx) + source(x1, y0, channel) * fx;
+                let bottom = source(x0, y1, channel) * (1.0 - fx) + source(x1, y1, channel) * fx;
+                rgba[((y * width + x) * 4) as usize + channel] =
+                    (top * (1.0 - fy) + bottom * fy).round() as u8;
+            }
+        }
+    }
+    CapturedFrame {
+        width,
+        height,
+        rgba,
+        captured_at_ms: 0,
+    }
+}
+
+#[test]
+fn pieces_counter_follows_the_display_scale() {
+    let recognizer = recognizer();
+    for (name, pieces) in [("zen_000007.bmp", 16), ("zen_000008.bmp", 20)] {
+        let frame = load_fixture(name);
+        for scale in [0.75, 0.9, 1.25, 1.5, 2.0] {
+            let result = recognizer.recognize(&rescale(&frame, scale)).unwrap();
+            assert_eq!(result.pieces_placed, Some(pieces), "{name} at {scale}x");
+        }
+    }
+}

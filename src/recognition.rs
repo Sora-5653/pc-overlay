@@ -278,6 +278,8 @@ pub struct RecognitionResult {
     pub current_confidence: f32,
     pub next_confidences: [f32; 5],
     pub board_rect: PixelRect,
+    /// ZEN's PIECES counter, when its statistics display is on and readable.
+    pub pieces_placed: Option<u32>,
     /// Diagnostic per-cell classification in image order (row 0 is the top):
     /// dominant piece, classified pixel count, and sampled pixel count.
     pub cell_samples: [[Option<(Piece, u16, u16)>; BOARD_WIDTH]; BOARD_HEIGHT],
@@ -451,6 +453,7 @@ impl TetrioRecognizer {
             current_confidence,
             next_confidences,
             board_rect,
+            pieces_placed: crate::pieces_ocr::read_pieces_placed(frame, board_rect),
             cell_samples: samples.map(|row| {
                 row.map(|sample| {
                     sample.map(|sample| (sample.piece, sample.hits, sample.sampled_pixels))
