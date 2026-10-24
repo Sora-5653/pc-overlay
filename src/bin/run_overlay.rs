@@ -175,9 +175,19 @@ fn main() -> Result<(), Box<dyn Error>> {
                 // The PIECES counter, when shown, decides the PC number; the
                 // tracker's own count is the fallback when it is unreadable.
                 let pieces = pieces_reading.confirm(recognition.pieces_placed);
-                if commit.is_some()
+                // Only when the latest snapshot is this frame's state, so the
+                // pieces placed in the PC match the counter.
+                let tracked_now = commit.as_ref().is_some_and(|commit| {
+                    !matches!(
+                        commit,
+                        CommitOutcome::IgnoredLowConfidence { .. }
+                            | CommitOutcome::RejectedHistoryDiscontinuity
+                    )
+                });
+                if tracked_now
                     && let Some(pieces) = pieces
-                    && tracker.align_pc_ordinal(PcOrdinal::from_pieces_placed(pieces))
+                    && let Some(ordinal) = tracker.ordinal_from_pieces(pieces)
+                    && tracker.align_pc_ordinal(ordinal)
                 {
                     eprintln!(
                         "PC number aligned to {} from PIECES {pieces}",
@@ -464,6 +474,8 @@ enum Origin {
     Source,
     /// A Setup Konbini setup the live queue can build.
     Konbini,
+    /// A 2-line perfect clear the shown pieces can play, before either.
+    TwoLine,
 }
 
 impl Origin {
@@ -471,6 +483,7 @@ impl Origin {
         match self {
             Origin::Source => "source",
             Origin::Konbini => "Konbini",
+            Origin::TwoLine => "2L PC",
         }
     }
 }
@@ -489,7 +502,8 @@ struct Guide {
     pc_rate: Option<f32>,
 }
 
-/// One guidance for every PC. The 2nd and 7th PCs use the source rules when they
+/// One guidance for every PC. A 2-line perfect clear the shown pieces can
+/// play comes first. The 2nd and 7th PCs then use the source rules when they
 /// select a setup for the case; otherwise, and on every other PC, a Setup
 /// Konbini setup the live queue can build is shown.
 fn unified_guidance(
@@ -500,6 +514,9 @@ fn unified_guidance(
     reviewed_only: bool,
     prefer_konbini: bool,
 ) -> Guide {
+    if let Some(guide) = konbini.two_line_guide(tracker, snapshot) {
+        return guide;
+    }
     let mut note = None;
     if case_size(snapshot.pc_ordinal).is_some() {
         if prefer_konbini {
@@ -553,6 +570,11 @@ struct KonbiniGuide {
     /// The PC rate of the setup last seen complete in this PC, kept for the
     /// solves searched from it.
     built_rate: Option<f32>,
+    /// 2-line perfect clears of the last state searched, while the board
+    /// follows one of them.
+    two_line: Option<SolveSession>,
+    /// Whether the last guide was a 2-line PC, so Ctrl+Alt+N / B cycle it.
+    two_line_shown: bool,
 }
 
 /// Perfect clears found by the solve search, cycled by Ctrl+Alt+N / B.
@@ -597,6 +619,8 @@ impl KonbiniGuide {
             solve: None,
             searched: None,
             built_rate: None,
+            two_line: None,
+            two_line_shown: false,
         }
     }
 
@@ -618,12 +642,12 @@ impl KonbiniGuide {
             // Handled by the caller, which owns the preference.
             KonbiniHotkey::PreferKonbini => {}
             // With perfect clears found, N / B switch between them.
-            KonbiniHotkey::Next => match &mut self.solve {
+            KonbiniHotkey::Next => match self.cycled_solve() {
                 Some(session) => session.index += 1,
                 None => self.index += 1,
             },
             // Wraps to the last candidate once the count is known.
-            KonbiniHotkey::Previous => match &mut self.solve {
+            KonbiniHotkey::Previous => match self.cycled_solve() {
                 Some(session) => session.index -= 1,
                 None => self.index -= 1,
             },
@@ -633,6 +657,71 @@ impl KonbiniGuide {
                 }
             }
         }
+    }
+
+    /// The perfect clears Ctrl+Alt+N / B switch: the 2-line PCs while one is
+    /// shown, else those found for a built setup.
+    fn cycled_solve(&mut self) -> Option<&mut SolveSession> {
+        if self.two_line_shown {
+            self.two_line.as_mut()
+        } else {
+            self.solve.as_mut()
+        }
+    }
+
+    /// Starts the candidate index and the searches over at a new PC.
+    fn sync_pc(&mut self, tracker: &SessionTracker) {
+        let pc_key = tracker
+            .current_pc_start()
+            .map(|start| (start.pc_ordinal.get(), start.timestamp_ms));
+        if pc_key != self.pc_key {
+            self.pc_key = pc_key;
+            self.index = 0;
+            self.solve = None;
+            self.searched = None;
+            self.built_rate = None;
+            self.two_line = None;
+        }
+    }
+
+    /// A 2-line perfect clear the board follows and HOLD, Current, and NEXT
+    /// can play, shown directly: the shape is the whole PC. `None` once the
+    /// board leaves every one, and the usual guidance takes over.
+    fn two_line_guide(
+        &mut self,
+        tracker: &SessionTracker,
+        snapshot: &pc_overlay_core::tracker::Snapshot,
+    ) -> Option<Guide> {
+        self.sync_pc(tracker);
+        let observation = &snapshot.observation;
+        let kept = self.two_line.as_mut().is_some_and(|session| {
+            if session.checked != *observation {
+                session
+                    .solves
+                    .retain(|solve| solve.playable(&mut self.finder, observation));
+                session.checked = observation.clone();
+            }
+            !session.solves.is_empty()
+        });
+        if !kept {
+            let solves =
+                konbini::find_two_line_perfect_clears(&mut self.finder, observation, SOLVE_LIMIT);
+            self.two_line = (!solves.is_empty()).then(|| SolveSession {
+                solves,
+                index: 0,
+                pc_rate: None,
+                checked: observation.clone(),
+            });
+        }
+        let guide = self
+            .two_line
+            .as_mut()
+            .and_then(|session| two_line_render(session, snapshot));
+        self.two_line_shown = guide.is_some();
+        if !self.two_line_shown {
+            self.two_line = None;
+        }
+        guide
     }
 
     fn start_fetch(&mut self) {
@@ -679,16 +768,7 @@ impl KonbiniGuide {
         tracker: &SessionTracker,
         snapshot: &pc_overlay_core::tracker::Snapshot,
     ) -> Guide {
-        let pc_key = tracker
-            .current_pc_start()
-            .map(|start| (start.pc_ordinal.get(), start.timestamp_ms));
-        if pc_key != self.pc_key {
-            self.pc_key = pc_key;
-            self.index = 0;
-            self.solve = None;
-            self.searched = None;
-            self.built_rate = None;
-        }
+        self.sync_pc(tracker);
         let message = if self.fetching.is_some() {
             Some("fetching Setup Konbini...".to_string())
         } else if let Some(error) = &self.error {
@@ -852,6 +932,58 @@ fn solve_guide(
         setup_complete: true,
         note: None,
         pc_rate: session.pc_rate,
+    })
+}
+
+/// The 2-line PC at the session's index, or the next one the board follows.
+fn two_line_render(
+    session: &mut SolveSession,
+    snapshot: &pc_overlay_core::tracker::Snapshot,
+) -> Option<Guide> {
+    let observation = &snapshot.observation;
+    let count = session.solves.len();
+    let start = session.index.rem_euclid(count as isize) as usize;
+    let (position, progress) =
+        (0..count)
+            .map(|offset| (start + offset) % count)
+            .find_map(|position| {
+                session.solves[position]
+                    .progress(&observation.board)
+                    .map(|progress| (position, progress))
+            })?;
+    session.index = position as isize;
+    let mut pieces: Vec<char> = session.solves[position]
+        .steps
+        .iter()
+        .map(|(piece, _)| piece_code(*piece))
+        .collect();
+    pieces.sort_unstable();
+    let pieces: String = pieces.into_iter().collect();
+    let status = format!(
+        "PC Overlay [2L PC]: 2-line perfect clear {}/{count} ({pieces}); the next PC is the {}; Ctrl+Alt+N/B to switch",
+        position + 1,
+        konbini::stage_label(snapshot.pc_ordinal.after_pieces(5).get()),
+    );
+    let cells = progress
+        .remaining
+        .iter()
+        .map(|cell| OverlayCell {
+            cell: cell.cell,
+            piece: cell.piece,
+            kind: if cell.piece == Some(observation.current) {
+                OverlayCellKind::Current
+            } else {
+                OverlayCellKind::Missing
+            },
+        })
+        .collect();
+    Some(Guide {
+        status,
+        cells,
+        origin: Origin::TwoLine,
+        setup_complete: false,
+        note: None,
+        pc_rate: None,
     })
 }
 
@@ -2194,6 +2326,46 @@ mod tests {
         assert_eq!(guide.cells.len(), 16);
         let note = guide.note.unwrap();
         assert!(note.contains("no data for the four-piece case"), "{note}");
+    }
+
+    #[test]
+    fn a_two_line_pc_comes_before_the_source_rules_and_konbini() {
+        use Piece::*;
+        let library = ijlo_rules();
+        let mut konbini = konbini_guide();
+        let mut tracker = tracker_at_pc_start(2, O, [I, L, J, O, S]);
+        let guide = unified(&library, &mut konbini, &tracker, false);
+        assert_eq!(guide.origin, Origin::TwoLine);
+        assert!(
+            guide
+                .status
+                .starts_with("PC Overlay [2L PC]: 2-line perfect clear 1/")
+                && guide.status.contains("(IJLOO)")
+                && guide.status.contains("the next PC is the 6th"),
+            "{}",
+            guide.status
+        );
+        // The whole PC is drawn, both O filled in as the Current piece (by
+        // piece, as for Setup Konbini).
+        assert_eq!(guide.cells.len(), 20);
+        assert_eq!(
+            guide
+                .cells
+                .iter()
+                .filter(|cell| cell.kind == OverlayCellKind::Current)
+                .count(),
+            8
+        );
+        assert!(!guide.setup_complete);
+
+        // A T on the board: no 2-line PC, the usual guidance again.
+        let mut off = observation(None, I, [L, J, O, S, Z]);
+        for (x, y) in [(0, 0), (1, 0), (2, 0), (1, 1)] {
+            off.board[y][x] = Some(T);
+        }
+        tracker.commit(off, 0.75, 3);
+        let guide = unified(&library, &mut konbini, &tracker, false);
+        assert_ne!(guide.origin, Origin::TwoLine, "{}", guide.status);
     }
 
     #[test]
