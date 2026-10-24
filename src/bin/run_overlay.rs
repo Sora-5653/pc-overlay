@@ -186,6 +186,12 @@ fn main() -> Result<(), Box<dyn Error>> {
                 });
                 if tracked_now
                     && let Some(pieces) = pieces
+                    && let Some(snapshot) = tracker.snapshots().last()
+                {
+                    konbini.pieces = Some((snapshot.queue_end, pieces));
+                }
+                if tracked_now
+                    && let Some(pieces) = pieces
                     && let Some(ordinal) = tracker.ordinal_from_pieces(pieces)
                     && tracker.align_pc_ordinal(ordinal)
                 {
@@ -575,6 +581,9 @@ struct KonbiniGuide {
     two_line: Option<SolveSession>,
     /// Whether the last guide was a 2-line PC, so Ctrl+Alt+N / B cycle it.
     two_line_shown: bool,
+    /// The PIECES counter read for the tracked state whose queue ends at
+    /// this position (`Snapshot::queue_end`).
+    pieces: Option<(usize, u32)>,
 }
 
 /// Perfect clears found by the solve search, cycled by Ctrl+Alt+N / B.
@@ -591,8 +600,9 @@ struct SolveSession {
 /// Perfect clears kept per search.
 const SOLVE_LIMIT: usize = 100;
 
-/// What a shortlist depends on: PC number, observation, and PC pieces.
-type ShortlistKey = (u8, pc_overlay_core::Observation, Vec<Piece>);
+/// What a shortlist depends on: PC number, observation, PC pieces, and the
+/// 7-bag position.
+type ShortlistKey = (u8, pc_overlay_core::Observation, Vec<Piece>, Option<usize>);
 
 /// A candidate setup by index into the library.
 #[derive(Debug, Clone)]
@@ -627,6 +637,7 @@ impl KonbiniGuide {
             built_rate: None,
             two_line: None,
             two_line_shown: false,
+            pieces: None,
         }
     }
 
@@ -797,10 +808,16 @@ impl KonbiniGuide {
                 pc_rate: None,
             };
         };
+        let pieces = self
+            .pieces
+            .filter(|(queue_end, _)| *queue_end == snapshot.queue_end)
+            .map(|(_, pieces)| pieces);
+        let current_index = current_bag_index(snapshot, pieces);
         let key = (
             snapshot.pc_ordinal.get(),
             snapshot.observation.clone(),
             pc_pieces(tracker, snapshot),
+            current_index,
         );
         if self
             .shortlist
@@ -810,7 +827,8 @@ impl KonbiniGuide {
             if self.finder.cached_moves() > FINDER_CACHE_LIMIT {
                 self.finder.clear_cache();
             }
-            let shortlist = konbini_shortlist(library, &mut self.finder, tracker, snapshot);
+            let shortlist =
+                konbini_shortlist(library, &mut self.finder, tracker, snapshot, current_index);
             self.shortlist = Some((key, shortlist));
         }
         let shortlist = &mut self.shortlist.as_mut().expect("just computed").1;
@@ -819,6 +837,7 @@ impl KonbiniGuide {
             &mut self.finder,
             shortlist,
             snapshot,
+            current_index,
             &mut self.index,
             RATE_BUDGET,
         );
@@ -1015,6 +1034,27 @@ fn pc_pieces(
         .collect()
 }
 
+/// Pieces dealt before Current (`konbini::current_bag_index`): from the
+/// PIECES counter read for this state (pieces placed and the one in HOLD),
+/// else from the PC number, as a perfect-clear loop deals 10 per PC. The
+/// counter is what holds when an earlier PC took another count.
+fn current_bag_index(
+    snapshot: &pc_overlay_core::tracker::Snapshot,
+    pieces: Option<u32>,
+) -> Option<usize> {
+    let observation = &snapshot.observation;
+    let hold = usize::from(observation.hold.is_some());
+    let filled = observation.board.iter().flatten().flatten().count();
+    let mut guesses: Vec<usize> = pieces
+        .map(|pieces| pieces as usize + hold)
+        .into_iter()
+        .collect();
+    if filled.is_multiple_of(4) {
+        guesses.push(10 * usize::from(snapshot.pc_ordinal.get() - 1) + filled / 4 + hold);
+    }
+    konbini::current_bag_index(observation, &guesses)
+}
+
 /// The setups of the snapshot's PC that match the board and can be built
 /// from its HOLD and queue.
 fn konbini_shortlist(
@@ -1022,14 +1062,14 @@ fn konbini_shortlist(
     finder: &mut Finder,
     tracker: &SessionTracker,
     snapshot: &pc_overlay_core::tracker::Snapshot,
+    current_index: Option<usize>,
 ) -> Vec<Shortlisted> {
     let stage = snapshot.pc_ordinal.get();
     let pieces = pc_pieces(tracker, snapshot);
     let query = BuildQuery {
         pc_pieces: &pieces,
         observation: &snapshot.observation,
-        // A perfect-clear loop deals 10 pieces per PC.
-        pieces_before_pc: Some(10 * usize::from(stage - 1)),
+        current_index,
     };
     library
         .candidates(stage, &query, finder)
@@ -1052,6 +1092,7 @@ fn rate_shortlist(
     finder: &mut Finder,
     shortlist: &mut [Shortlisted],
     snapshot: &pc_overlay_core::tracker::Snapshot,
+    current_index: Option<usize>,
     index: &mut isize,
     budget: Duration,
 ) {
@@ -1060,8 +1101,6 @@ fn rate_shortlist(
     }
     let started = Instant::now();
     let observation = &snapshot.observation;
-    // As for the build search: 10 pieces per earlier PC (the 7-bag position).
-    let before = 10 * usize::from(snapshot.pc_ordinal.get() - 1);
     let shown = index.rem_euclid(shortlist.len() as isize) as usize;
     let order = std::iter::once(shown).chain((0..shortlist.len()).filter(|at| *at != shown));
     for at in order {
@@ -1072,15 +1111,16 @@ fn rate_shortlist(
             return;
         }
         let candidate = &mut shortlist[at];
-        let first_index =
-            before + candidate.progress.placed_pieces() + usize::from(observation.hold.is_some());
-        candidate.rate = Some(konbini::state_pc_rate(
-            finder,
-            &library.setups[candidate.setup],
-            &candidate.progress,
-            observation,
-            first_index,
-        ));
+        // Unrated when the 7-bag position is unknown: the sheet's is shown.
+        candidate.rate = Some(current_index.and_then(|first_index| {
+            konbini::state_pc_rate(
+                finder,
+                &library.setups[candidate.setup],
+                &candidate.progress,
+                observation,
+                first_index,
+            )
+        }));
     }
     let shown_setup = shortlist[shown].setup;
     // Stable: ties keep the sheet's order.
@@ -1110,12 +1150,14 @@ fn konbini_guidance(
     index: &mut isize,
 ) -> (String, Vec<OverlayCell>) {
     let mut finder = Finder::new();
-    let mut shortlist = konbini_shortlist(library, &mut finder, tracker, snapshot);
+    let current_index = current_bag_index(snapshot, None);
+    let mut shortlist = konbini_shortlist(library, &mut finder, tracker, snapshot, current_index);
     rate_shortlist(
         library,
         &mut finder,
         &mut shortlist,
         snapshot,
+        current_index,
         index,
         Duration::MAX,
     );
@@ -2303,7 +2345,9 @@ mod tests {
         let tracker = tilj_pc_two();
         let snapshot = tracker.snapshots().last().unwrap();
         let mut finder = Finder::new();
-        let mut shortlist = konbini_shortlist(&library, &mut finder, &tracker, snapshot);
+        let current_index = current_bag_index(snapshot, None);
+        let mut shortlist =
+            konbini_shortlist(&library, &mut finder, &tracker, snapshot, current_index);
         assert_eq!(shortlist.len(), 2);
         // No budget: only the shown candidate is rated this frame.
         let mut index = 1;
@@ -2312,6 +2356,7 @@ mod tests {
             &mut finder,
             &mut shortlist,
             snapshot,
+            current_index,
             &mut index,
             Duration::ZERO,
         );
@@ -2321,6 +2366,7 @@ mod tests {
             &mut finder,
             &mut shortlist,
             snapshot,
+            current_index,
             &mut index,
             Duration::MAX,
         );
@@ -2330,7 +2376,8 @@ mod tests {
             .collect();
         assert!(rates[0] >= rates[1], "{rates:?}");
         // The candidate picked with Ctrl+Alt+N stays shown after the reorder.
-        let picked = konbini_shortlist(&library, &mut finder, &tracker, snapshot)[1].setup;
+        let picked =
+            konbini_shortlist(&library, &mut finder, &tracker, snapshot, current_index)[1].setup;
         assert_eq!(shortlist[index as usize].setup, picked);
     }
 

@@ -182,3 +182,75 @@ fn state_pc_rate_matches_the_sheet_for_the_named_case() {
         "swapped below 100%: {swapped_below}/{checked}"
     );
 }
+
+/// A 4th PC as played (PIECES 32, so Current is at index 33): S, O, and I
+/// are down and T is next. The 100% setups on the sheet clear only 1 in 3
+/// orders of the bag's rest here; at the 10-per-PC index (34) the queue
+/// does not follow the 7-bag.
+#[test]
+fn a_fourth_pc_off_the_ten_piece_count_is_rated_at_its_bag_position() {
+    use Piece::*;
+    use pc_overlay_core::{Observation, empty_board, konbini};
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("data/konbini");
+    let Ok(library) = KonbiniLibrary::load_dir(&dir) else {
+        eprintln!("skipped: no Setup Konbini cache in {}", dir.display());
+        return;
+    };
+    let mut board = empty_board();
+    for (x, y, piece) in [
+        (0, 0, S),
+        (1, 0, S),
+        (1, 1, S),
+        (2, 1, S),
+        (7, 0, O),
+        (8, 0, O),
+        (7, 1, O),
+        (8, 1, O),
+        (9, 0, I),
+        (9, 1, I),
+        (9, 2, I),
+        (9, 3, I),
+    ] {
+        board[y][x] = Some(piece);
+    }
+    let observation = Observation {
+        board,
+        hold: Some(S),
+        current: T,
+        next5: [Z, I, T, S, Z],
+    };
+    let index = konbini::current_bag_index(&observation, &[32 + 1, 30 + 3 + 1]);
+    assert_eq!(index, Some(33));
+    let pc_pieces = [S, O, I, S, T, Z, I, T, S, Z];
+    let query = konbini::BuildQuery {
+        pc_pieces: &pc_pieces,
+        observation: &observation,
+        current_index: index,
+    };
+    let mut finder = Finder::new();
+    let candidates = library.candidates(4, &query, &mut finder);
+    let lz_iso = candidates
+        .iter()
+        .find(|candidate| candidate.setup.id == "LZ-ISO")
+        .expect("LZ-ISO is shown");
+    assert_eq!(lz_iso.setup.sol_percent, Some(100.0));
+    let rate = konbini::state_pc_rate(
+        &mut finder,
+        lz_iso.setup,
+        &lz_iso.progress,
+        &observation,
+        33,
+    )
+    .unwrap();
+    assert!((rate - 100.0 / 3.0).abs() < 0.01, "{rate}");
+    assert_eq!(
+        konbini::state_pc_rate(
+            &mut finder,
+            lz_iso.setup,
+            &lz_iso.progress,
+            &observation,
+            34
+        ),
+        None
+    );
+}

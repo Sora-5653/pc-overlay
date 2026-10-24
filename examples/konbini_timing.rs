@@ -47,7 +47,7 @@ fn main() {
             let query = BuildQuery {
                 pc_pieces: &pc_pieces,
                 observation: &observation,
-                pieces_before_pc: Some(start),
+                current_index: Some(start),
             };
             let started = Instant::now();
             let candidates = library.candidates(stage, &query, &mut Finder::new());

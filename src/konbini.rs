@@ -335,6 +335,30 @@ pub fn state_pc_rate(
     Some(100.0 * cleared as f32 / total as f32)
 }
 
+/// Pieces dealt before Current, from `guesses` in order (the PIECES
+/// counter, the PC number), the first that the shown queue allows: no
+/// piece twice within a 7-bag. Failing those, the one 7-bag position the
+/// queue allows, if only one does (only the position matters to the bag).
+/// `None` when the position is unknown.
+pub fn current_bag_index(observation: &Observation, guesses: &[usize]) -> Option<usize> {
+    let queue = visible_queue(observation);
+    let follows_bag = |index: usize| {
+        (0..queue.len()).all(|at| {
+            let bag_start = (index + at - (index + at) % 7).max(index) - index;
+            !queue[bag_start..at].contains(&queue[at])
+        })
+    };
+    if let Some(index) = guesses.iter().copied().find(|index| follows_bag(*index)) {
+        return Some(index);
+    }
+    let base = guesses.first().map_or(0, |guess| guess - guess % 7);
+    let mut allowed = (base..base + 7).filter(|index| follows_bag(*index));
+    match (allowed.next(), allowed.next()) {
+        (Some(index), None) => Some(index),
+        _ => None,
+    }
+}
+
 /// Orders of the undisclosed pieces `state_pc_rate` checks at most.
 pub const RATE_SAMPLES: usize = 120;
 
@@ -429,9 +453,9 @@ pub struct BuildQuery<'a> {
     /// HOLD at the PC start followed by the queue disclosed since.
     pub pc_pieces: &'a [Piece],
     pub observation: &'a Observation,
-    /// Pieces dealt before this PC began (10 per PC in a perfect-clear
-    /// loop), for the 7-bag of undisclosed pieces. `None` assumes nothing.
-    pub pieces_before_pc: Option<usize>,
+    /// Pieces dealt before Current (`current_bag_index`), for the 7-bag of
+    /// undisclosed pieces. `None` assumes nothing.
+    pub current_index: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -558,12 +582,8 @@ impl KonbiniLibrary {
                 let progress = setup.progress(&observation.board)?;
                 let remaining = setup.target.piece_count() - progress.placed_pieces();
                 let slots = (remaining + 1).saturating_sub(queue.len());
-                let unknown = match query.pieces_before_pc {
-                    Some(before) => finder::bag_options(
-                        before + progress.placed_pieces() + usize::from(observation.hold.is_some()),
-                        &queue,
-                        slots,
-                    ),
+                let unknown = match query.current_index {
+                    Some(index) => finder::bag_options(index, &queue, slots),
                     None => vec![finder::ALL_PIECES.to_vec(); slots],
                 };
                 let buildable = finder.buildable(
@@ -977,7 +997,7 @@ mod tests {
         let query = BuildQuery {
             pc_pieces: &pc_pieces,
             observation,
-            pieces_before_pc: Some(10),
+            current_index: Some(10 + usize::from(observation.hold.is_some())),
         };
         library
             .candidates(2, &query, &mut Finder::new())
@@ -1070,5 +1090,22 @@ mod tests {
         assert_eq!(cache_file_name(3), "3rd.csv");
         assert_eq!(stage_label(7), "7th");
         assert_eq!(stage_label(8), "?");
+    }
+
+    #[test]
+    fn the_bag_index_is_the_first_guess_the_queue_allows() {
+        use Piece::*;
+        // A 4th PC on screen: PIECES 32 with S in HOLD puts Current at
+        // index 33, so the bag turns between Z and I. The 10-per-PC count
+        // (34) puts the two Z in one bag.
+        let screen = on_empty(Some(S), T, [Z, I, T, S, Z]);
+        assert_eq!(current_bag_index(&screen, &[33, 34]), Some(33));
+        assert_eq!(current_bag_index(&screen, &[34, 33]), Some(33));
+        // Alone, the queue allows a turn before I or before the second T.
+        assert_eq!(current_bag_index(&screen, &[34]), None);
+        assert_eq!(current_bag_index(&screen, &[]), None);
+        // Two Z in a row leave one position.
+        let pair = on_empty(Some(S), T, [Z, Z, I, O, L]);
+        assert_eq!(current_bag_index(&pair, &[30]), Some(33));
     }
 }
