@@ -19,9 +19,11 @@ const RAMP: &str = " .:-=+*#%@";
 
 /// Normalized intensity of each digit except 1 (told apart by its narrow
 /// width). TETR.IO scales this text with the board, so each template is the
-/// mean over recorded ZEN frames resampled to 0.45-2.3x; 5 and 8 never
-/// appeared in the counter there, so theirs come from the score below the
-/// board at a single scale.
+/// mean over recorded ZEN frames resampled to 0.45-2.3x (5 from a counter at
+/// 150, resampled to 0.55-2.3x). 8 never appeared in the counter, so its
+/// template comes from the score below the board at a single scale; the
+/// score's 5 differed from the counter's (a dim top bar, a lit lower left)
+/// and left every count with a 5 unread.
 #[rustfmt::skip]
 const DIGIT_TEMPLATES: [(u32, [&str; GRID_ROWS]); 9] = [
     (0, [
@@ -69,15 +71,15 @@ const DIGIT_TEMPLATES: [(u32, [&str; GRID_ROWS]); 9] = [
         "   +%.",
     ]),
     (5, [
-        "==++=.",
-        "@@%#*=",
-        "@%+:. ",
-        "@%#*=:",
-        "@%%%%*",
-        "+=-+%%",
-        "+-.-#@",
-        "%#*#%%",
-        "=#@%*:",
+        "#@@@%-",
+        "@@*++:",
+        "@%:.  ",
+        "@@@%*.",
+        "%%**@*",
+        ".. .%%",
+        "*+..%%",
+        "*@#%@+",
+        ".+##+ ",
     ]),
     (6, [
         ".+%%*.",
