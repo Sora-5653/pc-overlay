@@ -522,6 +522,18 @@ NEXT はそのうち 6 個しか見せない。`cargo run --release --example ko
 - その後の盤面は、セットアップと同じく解を図として読み（消えた行を推定）、置いた
   ミノは表示から消える。見つけたどの解にも従わない盤面になると、解を捨ててその
   盤面から探し直す。
+- HOLD と NEXT では解がないとき（PC に NEXT の次のミノが要る）は、連パフェで実際に
+  するように、次に置く 1 個だけを案内する（`konbini::staged_moves`）。Current か HOLD から
+  出せるミノの全ての置き場所について、NEXT の後に 7 バッグで許される並び（PC 率と同じく
+  最大 120 通り）のうち、置いた後もまだ PC がある並びの数を数え、多い順に並べる。
+  状態行は `no perfect clear with HOLD + NEXT yet; press S for the next placement (a PC stays
+  in 2/2 orders)`、`S` の後は `place Z first 1/N: a PC stays in 2/2 orders after NEXT`
+  （HOLD のミノなら `from HOLD` を付ける）。`Ctrl+Alt+N` / `Ctrl+Alt+B` で他の置き場所に
+  切り替える。置くと状態が変わり、見えたミノで解を探し直す。NEXT の先が 2 個以上要る盤面は
+  探さない（`STAGED_UNSEEN`）。2 個で最悪 0.25 秒、9 個で 7 秒かかった
+  （`cargo run --release --example staged_time`）。例: 4th PC で LZ-ISO を組み、HOLD T、
+  Current Z、NEXT ITSZJ のとき、見えているミノでは解がないが、J の後の L・O の 2 通りの
+  どちらでも PC が残る置き方がある。
 
 資料のルールがある 2nd PC は資料の解（`[source]`）を使い、探索した解は Setup Konbini の
 案内に使う。
@@ -719,6 +731,9 @@ Hold は含めない。例 `OSITJLZ OIJLTZS OSJTZIL`）は全 CPU コアで約 1
 11. 完了（2026-10-24）: Setup Konbini の PC 率を今の状態から計算し、候補をその順に並べる。
     シートの前提と違うミノで組むと 100% でなくなる形を、100% と出さない
     （[6 章](#setup-konbini-のデータと組み立ての探索)）。自動テストのみで、TETR.IO では未確認。
+12. 完了（2026-10-24）: HOLD と NEXT で PC 解がないときは、次に置く 1 個を、NEXT の後の
+    並びのうち PC が残る数の多い順に案内する（[6 章](#setup-konbini-のデータと組み立ての探索)）。
+    自動テストのみで、TETR.IO では未確認。
 
 `run-overlay` が Windows で利用者が使う画面である。S/Z キューと O 残しのセットアップは
 検証済み。サンドボックスのセットアップは検証済みの推薦ではなく参考の案内として出す。

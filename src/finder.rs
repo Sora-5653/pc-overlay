@@ -504,7 +504,8 @@ impl Finder {
         self.moves.clear();
     }
 
-    fn moves(&mut self, field: Mask, piece: Piece) -> Rc<[Mask]> {
+    /// The live placements `piece` can lock at on `field` (cached).
+    pub(crate) fn moves(&mut self, field: Mask, piece: Piece) -> Rc<[Mask]> {
         self.moves
             .entry((field, piece))
             .or_insert_with(|| lockable_placements(field, piece).into())
