@@ -1234,6 +1234,9 @@ fn build_overlay_state(
         "Current {current}  HOLD {hold}  NEXT {next}  confidence {:.2}",
         recognition.confidence
     );
+    if recognition.all_clear_banner {
+        detail.push_str("  (ALL CLEAR text ignored)");
+    }
     if verbose {
         detail.push_str(&format!(
             "  board={} weak={} ambiguous={} rect=({},{} {}x{})",
@@ -2455,6 +2458,34 @@ mod tests {
             guide.note.as_deref(),
             Some("source rules skipped (Ctrl+Alt+K)")
         );
+    }
+
+    #[test]
+    fn the_next_pc_is_guided_while_all_clear_is_shown() {
+        use Piece::*;
+        // tests/fixtures/frames/zen_000008.bmp: the ALL CLEAR text is on the
+        // board, PIECES reads 20, and recognition gives this empty board.
+        let cleared = observation(Some(J), T, [L, J, I, O, S]);
+        let mut before = observation(Some(J), Z, [T, L, J, I, O]);
+        before.board[0] = [Some(I); 10];
+        before.board[0][9] = None;
+        let mut tracker = SessionTracker::new(TrackerConfig::default());
+        tracker.commit(before, 0.75, 1);
+        tracker.commit(cleared, 0.80, 2);
+        let ordinal = tracker.ordinal_from_pieces(20).unwrap();
+        tracker.align_pc_ordinal(ordinal);
+        assert_eq!(tracker.pc_ordinal().get(), 3);
+
+        let library = ijlo_rules();
+        let mut konbini = konbini_guide();
+        let guide = unified(&library, &mut konbini, &tracker, false);
+        assert_eq!(guide.origin, Origin::Konbini);
+        assert!(
+            guide.status.contains("[Konbini 3rd]: TILJ"),
+            "{}",
+            guide.status
+        );
+        assert_eq!(guide.cells.len(), 16);
     }
 
     #[test]
