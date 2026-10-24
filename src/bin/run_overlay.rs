@@ -575,6 +575,8 @@ struct KonbiniGuide {
     two_line: Option<SolveSession>,
     /// Whether the last guide was a 2-line PC, so Ctrl+Alt+N / B cycle it.
     two_line_shown: bool,
+    /// Next placements for a built setup HOLD and NEXT cannot finish yet.
+    staged: Option<StagedSession>,
 }
 
 /// Perfect clears found by the solve search, cycled by Ctrl+Alt+N / B.
@@ -586,6 +588,16 @@ struct SolveSession {
     pc_rate: Option<f32>,
     /// The state `solves` were last checked against.
     checked: pc_overlay_core::Observation,
+}
+
+/// Placements of the next piece (`konbini::staged_moves`) for the state
+/// they were searched on; the placement changes the state and the search
+/// runs again.
+#[derive(Debug, Clone)]
+struct StagedSession {
+    moves: Vec<konbini::StagedMove>,
+    index: isize,
+    observation: pc_overlay_core::Observation,
 }
 
 /// Perfect clears kept per search.
@@ -627,6 +639,7 @@ impl KonbiniGuide {
             built_rate: None,
             two_line: None,
             two_line_shown: false,
+            staged: None,
         }
     }
 
@@ -648,15 +661,9 @@ impl KonbiniGuide {
             // Handled by the caller, which owns the preference.
             KonbiniHotkey::PreferKonbini => {}
             // With perfect clears found, N / B switch between them.
-            KonbiniHotkey::Next => match self.cycled_solve() {
-                Some(session) => session.index += 1,
-                None => self.index += 1,
-            },
+            KonbiniHotkey::Next => *self.cycled_index() += 1,
             // Wraps to the last candidate once the count is known.
-            KonbiniHotkey::Previous => match self.cycled_solve() {
-                Some(session) => session.index -= 1,
-                None => self.index -= 1,
-            },
+            KonbiniHotkey::Previous => *self.cycled_index() -= 1,
             KonbiniHotkey::Refetch => {
                 if self.fetching.is_none() {
                     self.start_fetch();
@@ -667,12 +674,17 @@ impl KonbiniGuide {
 
     /// The perfect clears Ctrl+Alt+N / B switch: the 2-line PCs while one is
     /// shown, else those found for a built setup.
-    fn cycled_solve(&mut self) -> Option<&mut SolveSession> {
+    fn cycled_index(&mut self) -> &mut isize {
         if self.two_line_shown {
-            self.two_line.as_mut()
-        } else {
-            self.solve.as_mut()
+            if let Some(session) = self.two_line.as_mut() {
+                return &mut session.index;
+            }
+        } else if let Some(session) = self.solve.as_mut() {
+            return &mut session.index;
+        } else if let Some(staged) = self.staged.as_mut() {
+            return &mut staged.index;
         }
+        &mut self.index
     }
 
     /// Starts the candidate index and the searches over at a new PC.
@@ -687,6 +699,7 @@ impl KonbiniGuide {
             self.searched = None;
             self.built_rate = None;
             self.two_line = None;
+            self.staged = None;
         }
     }
 
@@ -854,8 +867,35 @@ impl KonbiniGuide {
             // A built setup, or a board no setup explains (the player went
             // their own way): search the perfect clears from here.
             self.searched = Some(observation.clone());
+            self.staged = None;
             let solves = konbini::find_perfect_clears(&mut self.finder, observation, SOLVE_LIMIT);
-            if !solves.is_empty() {
+            if solves.is_empty() {
+                // None with the pieces shown: the next placement that keeps
+                // one for the most orders after NEXT, a piece at a time.
+                let hold = usize::from(observation.hold.is_some());
+                let placed = if shown_complete {
+                    usize::try_from(self.index)
+                        .ok()
+                        .and_then(|index| shortlist.get(index))
+                        .map(|candidate| candidate.progress.placed_pieces())
+                } else {
+                    let filled = observation.board.iter().flatten().flatten().count();
+                    filled.is_multiple_of(4).then_some(filled / 4)
+                };
+                // As for the PC rate: 10 pieces per earlier PC.
+                let first_index = placed
+                    .map(|placed| 10 * usize::from(snapshot.pc_ordinal.get() - 1) + placed + hold);
+                let moves = first_index.map_or_else(Vec::new, |first_index| {
+                    konbini::staged_moves(&mut self.finder, observation, first_index)
+                });
+                if !moves.is_empty() {
+                    self.staged = Some(StagedSession {
+                        moves,
+                        index: 0,
+                        observation: observation.clone(),
+                    });
+                }
+            } else {
                 self.solve = Some(SolveSession {
                     solves,
                     index: 0,
@@ -866,6 +906,9 @@ impl KonbiniGuide {
                     return guide;
                 }
             }
+        }
+        if let Some(guide) = staged_guide(&mut self.staged, snapshot, show, self.built_rate) {
+            return guide;
         }
         if shown_complete || board_off_setup {
             let stage = konbini::stage_label(snapshot.pc_ordinal.get());
@@ -947,6 +990,72 @@ fn solve_guide(
         setup_complete: true,
         note: None,
         pc_rate: session.pc_rate,
+    })
+}
+
+/// The next placement while HOLD and NEXT have no perfect clear: shown when
+/// the solve display is ON, announced otherwise. Only for the state it was
+/// searched on.
+fn staged_guide(
+    staged: &mut Option<StagedSession>,
+    snapshot: &pc_overlay_core::tracker::Snapshot,
+    show: bool,
+    pc_rate: Option<f32>,
+) -> Option<Guide> {
+    let observation = &snapshot.observation;
+    if staged
+        .as_ref()
+        .is_some_and(|session| session.observation != *observation)
+    {
+        *staged = None;
+    }
+    let session = staged.as_mut()?;
+    let count = session.moves.len();
+    let position = session.index.rem_euclid(count as isize) as usize;
+    session.index = position as isize;
+    let staged = &session.moves[position];
+    let stage = konbini::stage_label(snapshot.pc_ordinal.get());
+    let piece = piece_code(staged.piece);
+    let from_hold = if staged.piece == observation.current {
+        ""
+    } else {
+        " from HOLD"
+    };
+    let (cleared, total) = (staged.cleared, staged.total);
+    let status = if show {
+        format!(
+            "PC Overlay [Konbini {stage}]: no perfect clear with HOLD + NEXT yet; place {piece}{from_hold} first {}/{count}: a PC stays in {cleared}/{total} orders after NEXT; Ctrl+Alt+N/B to switch",
+            position + 1
+        )
+    } else {
+        format!(
+            "PC Overlay [Konbini {stage}]: no perfect clear with HOLD + NEXT yet; press S for the next placement (a PC stays in {cleared}/{total} orders)"
+        )
+    };
+    let cells = if show {
+        staged
+            .cells
+            .iter()
+            .map(|cell| OverlayCell {
+                cell: *cell,
+                piece: Some(staged.piece),
+                kind: if staged.piece == observation.current {
+                    OverlayCellKind::Current
+                } else {
+                    OverlayCellKind::Missing
+                },
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    Some(Guide {
+        status,
+        cells,
+        origin: Origin::Konbini,
+        setup_complete: true,
+        note: None,
+        pc_rate,
     })
 }
 
@@ -2609,6 +2718,82 @@ mod tests {
             CommitOutcome::Accepted { .. }
         ));
         tracker
+    }
+
+    #[test]
+    fn a_staged_placement_shows_one_piece_at_a_time() {
+        use Piece::*;
+        // LZ-ISO built on a 4th PC (Current at index 34): J is the last piece
+        // shown, and the perfect clear needs the piece after it.
+        let tracker = tilj_pc_two();
+        let mut snapshot = tracker.snapshots().last().unwrap().clone();
+        snapshot.pc_ordinal = pc_overlay_core::PcOrdinal::new(4).unwrap();
+        let mut board = pc_overlay_core::empty_board();
+        for (x, y, piece) in [
+            (0, 0, S),
+            (1, 0, S),
+            (1, 1, S),
+            (2, 1, S),
+            (7, 0, O),
+            (8, 0, O),
+            (7, 1, O),
+            (8, 1, O),
+            (9, 0, I),
+            (9, 1, I),
+            (9, 2, I),
+            (9, 3, I),
+        ] {
+            board[y][x] = Some(piece);
+        }
+        snapshot.observation = pc_overlay_core::Observation {
+            board,
+            hold: Some(T),
+            current: Z,
+            next5: [I, T, S, Z, J],
+        };
+        let moves = konbini::staged_moves(&mut Finder::new(), &snapshot.observation, 34);
+        let count = moves.len();
+        let mut staged = Some(StagedSession {
+            moves,
+            index: 0,
+            observation: snapshot.observation.clone(),
+        });
+        let guide = staged_guide(&mut staged, &snapshot, false, Some(100.0)).unwrap();
+        assert!(
+            guide.status.contains(
+                "[Konbini 4th]: no perfect clear with HOLD + NEXT yet; press S for the next placement (a PC stays in 2/2 orders)"
+            ),
+            "{}",
+            guide.status
+        );
+        assert!(guide.setup_complete && guide.cells.is_empty());
+        assert_eq!(guide.pc_rate, Some(100.0));
+
+        // S shows the placement; N / B switch to the others.
+        let guide = staged_guide(&mut staged, &snapshot, true, Some(100.0)).unwrap();
+        assert!(
+            guide.status.contains(&format!(
+                " first 1/{count}: a PC stays in 2/2 orders after NEXT"
+            )),
+            "{}",
+            guide.status
+        );
+        assert_eq!(guide.cells.len(), 4);
+        let mut mode = KonbiniGuide::new(PathBuf::from("unused"));
+        mode.staged = staged.take();
+        mode.apply(KonbiniHotkey::Previous);
+        let guide = staged_guide(&mut mode.staged, &snapshot, true, None).unwrap();
+        assert!(
+            guide.status.contains(&format!(" first {count}/{count}:")),
+            "{}",
+            guide.status
+        );
+
+        // Placing a piece changes the state, and the search runs again.
+        let mut placed = snapshot.clone();
+        placed.observation.current = I;
+        assert!(staged_guide(&mut mode.staged, &placed, true, None).is_none());
+        assert!(mode.staged.is_none());
     }
 
     #[test]

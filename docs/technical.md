@@ -546,6 +546,22 @@ NEXT はそのうち 6 個しか見せない。`cargo run --release --example ko
 - その後の盤面は、セットアップと同じく解を図として読み（消えた行を推定）、置いた
   ミノは表示から消える。見つけたどの解にも従わない盤面になると、解を捨ててその
   盤面から探し直す。
+- HOLD と NEXT では解がないとき（PC に NEXT の次のミノが要る）は、連パフェで実際に
+  するように、次に置く 1 個だけを案内する（`konbini::staged_moves`）。Current か HOLD から
+  出せるミノの全ての置き場所について、NEXT の後に 7 バッグで許される並び（PC 率と同じく
+  最大 120 通り）のうち、置いた後もまだ PC がある並びの数を数え、多い順に並べる。
+  状態行は `no perfect clear with HOLD + NEXT yet; press S for the next placement (a PC stays
+  in 2/2 orders)`、`S` の後は `place Z first 1/N: a PC stays in 2/2 orders after NEXT`
+  （HOLD のミノなら `from HOLD` を付ける）。`Ctrl+Alt+N` / `Ctrl+Alt+B` で他の置き場所に
+  切り替える。置くと状態が変わり、見えたミノで解を探し直す。NEXT の先が 3 個以上要る盤面は
+  探さない（`STAGED_UNSEEN`）。置き場所ごとの PC 判定は、残りのミノの並び全てで敷き詰めの
+  探索を 1 回にまとめ（`Finder::perfect_clear_queues`、並びごとに打てるかだけを確かめる）、
+  上から真っすぐ落とせる置き場所は手生成を省く（`Finder::can_lock`）。これで NEXT の先が
+  2 個の盤面は平均 115 ms・最悪 0.25 秒から平均 14 ms・最悪 36 ms になった
+  （`cargo run --release --example staged_time`、結果のハッシュは変更前と一致）。
+  9 個先まで見る盤面は 7 秒かかるので探さない。例: 4th PC で LZ-ISO を組み、HOLD T、
+  Current Z、NEXT ITSZJ のとき、見えているミノでは解がないが、J の後の L・O の 2 通りの
+  どちらでも PC が残る置き方がある。
 
 資料のルールがある 2nd PC は資料の解（`[source]`）を使い、探索した解は Setup Konbini の
 案内に使う。
@@ -753,6 +769,9 @@ Hold は含めない。例 `OSITJLZ OIJLTZS OSJTZIL`）は全 CPU コアで約 1
 14. 完了（2026-10-24）: 資料のセットアップを組む順番を SRS+ で判定する（`setup_order`、
     [3 章](#3-資料全体からのケース自動生成)）。上に乗るミノが下のミノより先に来て HOLD でも
     待てない並びでは、そのセットアップを候補から外す。自動テストのみで、TETR.IO では未確認。
+15. 完了（2026-10-24）: HOLD と NEXT で PC 解がないときは、次に置く 1 個を、NEXT の後の
+    並びのうち PC が残る数の多い順に案内する（[6 章](#setup-konbini-のデータと組み立ての探索)）。
+    自動テストのみで、TETR.IO では未確認。
 
 `run-overlay` が Windows で利用者が使う画面である。S/Z キューと O 残しのセットアップは
 検証済み。サンドボックスのセットアップは検証済みの推薦ではなく参考の案内として出す。
