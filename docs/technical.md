@@ -213,8 +213,10 @@ cargo test --test generated_cases               # 5040 通り全てで Rust の 
 
 GitHub Actions（`.github/workflows/ci.yml`）が、プルリクエストと `main` への push の
 たびに、きれいな Windows のチェックアウトで `cargo fmt --check`、
-`cargo clippy --all-targets -- -D warnings`、`cargo test --release`（生成ケースの
-テストは最適化なしだと数分かかる）を走らせる。ワークフローはローカルの
+`cargo clippy --all-targets -- -D warnings`、`cargo test --release` を走らせる。
+生成ケースの照合テスト（約 800 万回の判定）は最適化なしだと数分かかるので、CPU コア数で
+並列に回し、`Cargo.toml` の `[profile.test] opt-level = 3` で手元の `cargo test` も
+最適化ビルドにしている（2026-10-23 から。全テストで約 8 秒）。ワークフローはローカルの
 ツールチェーンと同じ Rust 1.97.1 に固定している。新しい版は Clippy の検査を増やす
 （Rust 1.99 は `chunks_exact(4)` と手書きの最下位ビット取り出しを指摘する）ので、
 固定はローカルのツールチェーンと一緒に上げる。CI が見るのはリポジトリ自体の中身だけで、
@@ -276,8 +278,8 @@ PC をまたぐ Undo と、再同期・リセット・続かない PC より前�
 が HOLD をどの時点の状態に戻すかは、TETR.IO では未確認。
 
 `run-overlay` の実行中に `Ctrl+Alt+1`〜`Ctrl+Alt+7` を押すと、途中から起動したときや
-認識を誤ったときに番号を合わせ直せる。オーバーレイの状態行は、PC 2 を待っているか、
-4 個のケースが IJLO でないか、どの IJLO セットアップが有効かを示す。
+認識を誤ったときに番号を合わせ直せる。オーバーレイの状態行は、案内の出どころ
+（資料か Setup Konbini か）と、どのセットアップが有効かを示す（[6 章](#6-統合案内資料のルール--setup-konbini)）。
 
 ZEN の設定で統計を表示していると、盤面の左に PIECES（置いたミノの数）が出る。
 `pieces_ocr` は盤面の左の文字を行に分け、`PIECES` という見出しを型紙で見つけ、その
@@ -472,16 +474,16 @@ NEXT はそのうち 6 個しか見せない。`cargo run --release --example ko
   ミノは表示から消える。見つけたどの解にも従わない盤面になると、解を捨ててその
   盤面から探し直す。
 
-資料のルールがある 2nd PC は資料の解（`[source]`）を使い、探索した解は Setup Konbini の
-案内に使う。
+資料のルールがある 2nd PC と 7th PC は資料の解（`[source]`）を使い、探索した解は
+Setup Konbini の案内に使う。
 
 確認:
 
-- `tests/pc_solutions.rs`: 資料の検証済みの解 1008 個（`data/ijlo.json` と
-  `data/cases/*.json`）は全て、完成したセットアップから、解のミノを任意の順にして
+- `tests/pc_solutions.rs`: 資料の検証済みの解 1448 個（`data/ijlo.json` と
+  `data/cases/*.json`。2026-10-23 に Bad 2nd と 7th の 440 個を加えた）は全て、完成したセットアップから、解のミノを任意の順にして
   探索で見つかる（各ミノをその種類のセルに限る。これで除かれるのは他の解だけ）。
   資料の解は SRS の 90 度の動きで確かめたもので、全て SRS+ でも到達できる。
-- `cargo run --release --example pc_timing`: 同じ 1008 個のセットアップで、解のミノを
+- `cargo run --release --example pc_timing`（2026-10-22 時点の 1008 個で計測）: その 1008 個のセットアップで、解のミノを
   混ぜてキューにし、HOLD は空、キャッシュも空。7 個以下の探索 988 回（オーバーレイが
   見る範囲）は平均 3.6 ms、最悪 31 ms。9 個まで（1 個のセットアップ）では平均 7.7 ms、
   最悪 475 ms。1008 個のキューのうち 950 個で PC ができ、比べられる 921 件のうち 567 件で
@@ -489,8 +491,8 @@ NEXT はそのうち 6 個しか見せない。`cargo run --release --example ko
 - `cargo test --bin run-overlay`: 組んだ TILJ のセットアップが告知され、`S` で 24 セルの
   解が出て、`Ctrl+Alt+N` で別の解に切り替わり、置いた解のミノが表示から消える。
 
-未実装: 資料のセットアップで資料の解が使えないときの解、NEXT の後のまだ見えない
-ミノ、TETR.IO での確認。
+未実装: 資料のセットアップで資料の解が使えないときの解、TETR.IO での確認。NEXT の後の
+まだ見えないミノは、上のとおり意図して探索に使わない。
 
 ## 8. 設定ウィンドウ（`pc-overlay-gui`）
 
@@ -656,6 +658,13 @@ Hold は含めない。例 `OSITJLZ OIJLTZS OSJTZIL`）は全 CPU コアで約 1
    キュー上の位置で Undo を見分ける（[5 章](#5-pc-番号と解の表示)、`src/tracker.rs`
    で PC の直前・直後への Undo と同じ PC の中での Undo を単体テスト）。TETR.IO では
    未確認。
+9. 完了（2026-10-23）: 実機で使うための改善。PC 解は画面に見えているミノだけで探し、
+   表示中の解が打てなくなったら外す（[7 章](#7-pc-解の探索srs)）。Setup Konbini の
+   セットアップの PC 率を盤面の上に表示する。ZEN の PIECES 表示から PC 番号を読む
+   （[5 章](#5-pc-番号と解の表示)）。ホットキーはキーボードフックで受け取り、TETR.IO が
+   手前にない間はオーバーレイを隠す（[6 章](#6-統合案内資料のルール--setup-konbini)）。
+   Algebruh 氏の Bad 2nd と 7th の資料をケースとして取り込む
+   （[3 章](#3-資料全体からのケース自動生成)）。いずれも自動テストのみで、TETR.IO では未確認。
 
 `run-overlay` が Windows で利用者が使う画面である。S/Z キューと O 残しのセットアップは
 検証済み。サンドボックスのセットアップは検証済みの推薦ではなく参考の案内として出す。
