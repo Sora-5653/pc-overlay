@@ -278,6 +278,9 @@ pub struct RecognitionResult {
     pub current_confidence: f32,
     pub next_confidences: [f32; 5],
     pub board_rect: PixelRect,
+    /// The yellow ALL CLEAR text shown after a perfect clear covered the
+    /// board; its cells were left out of `board`.
+    pub all_clear_banner: bool,
     /// ZEN's PIECES counter, when its statistics display is on and readable.
     pub pieces_placed: Option<u32>,
     /// Diagnostic per-cell classification in image order (row 0 is the top):
@@ -387,6 +390,11 @@ impl TetrioRecognizer {
             .map(|active| to_board(&active.cells))
             .unwrap_or_default();
         let ghost_cells = to_board(&ghost_cells);
+        let banner_cells = find_all_clear_banner(
+            &samples,
+            &[active_cells.as_slice(), ghost_cells.as_slice()].concat(),
+            self.config.board_cell_ambiguous_hits,
+        );
 
         let mut board = empty_board();
         let mut board_cells = 0usize;
@@ -402,6 +410,7 @@ impl TetrioRecognizer {
             {
                 if active_cells.contains(&(image_row, column))
                     || ghost_cells.contains(&(image_row, column))
+                    || banner_cells.contains(&(image_row, column))
                 {
                     continue;
                 }
@@ -453,6 +462,7 @@ impl TetrioRecognizer {
             current_confidence,
             next_confidences,
             board_rect,
+            all_clear_banner: !banner_cells.is_empty(),
             pieces_placed: crate::pieces_ocr::read_pieces_placed(frame, board_rect),
             cell_samples: samples.map(|row| {
                 row.map(|sample| {
@@ -706,6 +716,46 @@ fn find_active_component(
         }
     }
     best
+}
+
+/// Cells of the yellow ALL CLEAR text TETR.IO draws across the middle of the
+/// board after a perfect clear, in board image coordinates.
+///
+/// Placed pieces rest on the floor or on other cells and line clears remove
+/// whole rows, so the occupied rows of a real board always run unbroken up
+/// from the bottom. Coloured cells above the first empty row cannot be placed
+/// pieces; when every such cell is yellow (the text reads as O) they are the
+/// banner, and every yellow sample up there is dropped, faint edges included.
+/// The banner stays up for a while, so pieces placed meanwhile still form the
+/// board below it. `skip` holds the active piece and its ghost.
+fn find_all_clear_banner(
+    samples: &[[Option<CellSample>; BOARD_WIDTH]; BOARD_HEIGHT],
+    skip: &[(usize, usize)],
+    ambiguous_hits: u16,
+) -> Vec<(usize, usize)> {
+    let coloured = |row: usize, column: usize| {
+        samples[row][column]
+            .filter(|sample| sample.hits >= ambiguous_hits && !skip.contains(&(row, column)))
+    };
+    let Some(first_empty) = (0..BOARD_HEIGHT)
+        .rev()
+        .find(|&row| (0..BOARD_WIDTH).all(|column| coloured(row, column).is_none()))
+    else {
+        return Vec::new();
+    };
+    let mut floating = (0..first_empty)
+        .flat_map(|row| (0..BOARD_WIDTH).filter_map(move |column| coloured(row, column)))
+        .peekable();
+    if floating.peek().is_none() || !floating.all(|sample| sample.piece == Piece::O) {
+        return Vec::new();
+    }
+    (0..first_empty)
+        .flat_map(|row| (0..BOARD_WIDTH).map(move |column| (row, column)))
+        .filter(|&(row, column)| {
+            !skip.contains(&(row, column))
+                && samples[row][column].is_some_and(|sample| sample.piece == Piece::O)
+        })
+        .collect()
 }
 
 fn find_ghost_cells(
@@ -1592,6 +1642,56 @@ mod tests {
         }
         let active = find_active_component(&samples, 60, 8).unwrap();
         assert!(find_ghost_cells(&samples, &active, 60).is_empty());
+    }
+
+    /// Yellow text across image rows 7-10, plus a faint edge at row 6.
+    fn banner_samples() -> [[Option<CellSample>; BOARD_WIDTH]; BOARD_HEIGHT] {
+        let mut samples = [[None; BOARD_WIDTH]; BOARD_HEIGHT];
+        for row in samples.iter_mut().take(11).skip(7) {
+            for cell in row.iter_mut().take(9).skip(1) {
+                *cell = Some(cell_sample(Piece::O, 85, 200.0));
+            }
+        }
+        samples[6][3] = Some(cell_sample(Piece::O, 14, 150.0));
+        samples
+    }
+
+    #[test]
+    fn all_clear_text_above_an_empty_row_is_the_banner() {
+        let samples = banner_samples();
+        let banner = find_all_clear_banner(&samples, &[], 40);
+        assert_eq!(banner.len(), 4 * 8 + 1);
+
+        // Pieces placed while the text is still up form the board below it.
+        let mut samples = banner_samples();
+        for cell in samples[19].iter_mut().take(6) {
+            *cell = Some(cell_sample(Piece::L, 120, 150.0));
+        }
+        samples[18][0] = Some(cell_sample(Piece::O, 120, 150.0));
+        let banner = find_all_clear_banner(&samples, &[], 40);
+        assert_eq!(banner.len(), 4 * 8 + 1);
+        assert!(banner.iter().all(|&(row, _)| row < 18));
+    }
+
+    #[test]
+    fn a_board_resting_on_the_floor_is_not_the_banner() {
+        // Yellow cells stacked up from the floor are placed O pieces.
+        let mut samples = [[None; BOARD_WIDTH]; BOARD_HEIGHT];
+        for row in samples.iter_mut().skip(16) {
+            row[0] = Some(cell_sample(Piece::O, 120, 150.0));
+        }
+        assert!(find_all_clear_banner(&samples, &[], 40).is_empty());
+
+        // Other colours above an empty row are not the yellow text.
+        let mut samples = banner_samples();
+        samples[8][4] = Some(cell_sample(Piece::T, 85, 200.0));
+        assert!(find_all_clear_banner(&samples, &[], 40).is_empty());
+
+        // The active piece in the spawn rows is left to its own mask.
+        let mut samples = [[None; BOARD_WIDTH]; BOARD_HEIGHT];
+        samples[0][4] = Some(cell_sample(Piece::O, 120, 200.0));
+        samples[0][5] = Some(cell_sample(Piece::O, 120, 200.0));
+        assert!(find_all_clear_banner(&samples, &[(0, 4), (0, 5)], 40).is_empty());
     }
 
     #[test]

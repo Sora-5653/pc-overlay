@@ -231,9 +231,15 @@ pub enum Condition {
         #[serde(default)]
         prefix: Vec<Piece>,
         /// The case pieces the setup uses. With the case start known, they
-        /// are played from the queue (any order, before every other piece).
+        /// are played from the queue before every other piece, in an order
+        /// `setup_order` allows.
         #[serde(default)]
         setup: Vec<Piece>,
+        /// `[placed, allowed]` over `setup` (bit i is `setup[i]`): the setup
+        /// pieces SRS can place next on the empty board the PC starts with.
+        /// Empty means any order.
+        #[serde(default)]
+        setup_order: Vec<(u32, u32)>,
         solves: Vec<SolvableSolve>,
     },
 }
@@ -350,8 +356,9 @@ impl Condition {
             Self::Solvable {
                 prefix,
                 setup,
+                setup_order,
                 solves,
-            } => solvable(context, prefix, setup, solves),
+            } => solvable(context, prefix, setup, setup_order, solves),
         }
     }
 
@@ -362,8 +369,9 @@ impl Condition {
             Self::Solvable {
                 prefix,
                 setup,
+                setup_order,
                 solves,
-            } => Some(solvable_counts(context, prefix, setup, solves)),
+            } => Some(solvable_counts(context, prefix, setup, setup_order, solves)),
             _ => None,
         }
     }
@@ -437,10 +445,12 @@ impl Condition {
             Self::Solvable {
                 prefix,
                 setup,
+                setup_order,
                 solves,
             } => Self::Solvable {
                 prefix: prefix.iter().map(|piece| piece.mirrored()).collect(),
                 setup: setup.iter().map(|piece| piece.mirrored()).collect(),
+                setup_order: setup_order.clone(),
                 // The SRS kick table is not symmetric; build_cases.py writes
                 // mirrored setups with their own tables, so this mirror is
                 // only for completeness.
@@ -654,9 +664,10 @@ fn solvable(
     context: &EvalContext,
     prefix: &[Piece],
     setup: &[Piece],
+    setup_order: &[(u32, u32)],
     solves: &[SolvableSolve],
 ) -> EvalResult {
-    match solvable_counts(context, prefix, setup, solves) {
+    match solvable_counts(context, prefix, setup, setup_order, solves) {
         (works, total) if works == total => EvalResult::Satisfied,
         (0, _) => EvalResult::Failed,
         _ => EvalResult::Pending,
@@ -668,6 +679,7 @@ fn solvable_counts(
     context: &EvalContext,
     prefix: &[Piece],
     setup: &[Piece],
+    setup_order: &[(u32, u32)],
     solves: &[SolvableSolve],
 ) -> (usize, usize) {
     let mut disclosed = Vec::with_capacity(BAG_SIZE);
@@ -693,6 +705,7 @@ fn solvable_counts(
         start_hold.hash(&mut hasher);
         lead.hash(&mut hasher);
         base.hash(&mut hasher);
+        setup_order.hash(&mut hasher);
         solves.hash(&mut hasher);
         hasher.finish()
     };
@@ -719,14 +732,14 @@ fn solvable_counts(
         total += 1;
         let solved = solves.iter().any(|solve| {
             if !solve.setup_in_table {
-                Replay::new(&queue, base, solve).playable(start_hold)
+                Replay::new(&queue, base, setup_order, solve).playable(start_hold)
             } else if from_case_start {
-                Replay::new(&queue, &[], solve).playable(start_hold)
+                Replay::new(&queue, &[], &[], solve).playable(start_hold)
             } else {
                 setup_first.clear();
                 setup_first.extend_from_slice(setup);
                 setup_first.extend_from_slice(&queue);
-                Replay::new(&setup_first, &[], solve).playable(None)
+                Replay::new(&setup_first, &[], &[], solve).playable(None)
             }
         });
         if solved {
@@ -746,22 +759,30 @@ fn solvable_counts(
 
 /// Mirrors `playable` in tools/build_cases.py: place Current, move it to an
 /// empty HOLD (locked until the next placement), or swap by placing the held
-/// piece. `base` pieces (the setup's case pieces) may be placed in any order
-/// but all before any solve piece; solve pieces follow the SRS table. Bits
-/// `0..solve.pieces.len()` are solve pieces, the bits above them `base`.
+/// piece. `base` pieces (the setup's case pieces) are placed before any solve
+/// piece, in an order `base_order` allows (any order when it is empty);
+/// solve pieces follow the solve's SRS table. Bits `0..solve.pieces.len()`
+/// are solve pieces, the bits above them `base`.
 struct Replay<'a> {
     queue: &'a [Piece],
     base: &'a [Piece],
+    base_order: &'a [(u32, u32)],
     solve: &'a SolvableSolve,
     goal: u32,
     seen: std::collections::HashSet<(usize, Option<Piece>, u32, bool)>,
 }
 
 impl<'a> Replay<'a> {
-    fn new(queue: &'a [Piece], base: &'a [Piece], solve: &'a SolvableSolve) -> Self {
+    fn new(
+        queue: &'a [Piece],
+        base: &'a [Piece],
+        base_order: &'a [(u32, u32)],
+        solve: &'a SolvableSolve,
+    ) -> Self {
         Self {
             queue,
             base,
+            base_order,
             solve,
             goal: (1u32 << (solve.pieces.len() + base.len())) - 1,
             seen: std::collections::HashSet::new(),
@@ -777,7 +798,13 @@ impl<'a> Replay<'a> {
         let solve_bits = self.solve.pieces.len();
         let base_mask = ((1u32 << self.base.len()) - 1) << solve_bits;
         if placed & base_mask != base_mask {
-            !placed & base_mask
+            if self.base_order.is_empty() {
+                return !placed & base_mask;
+            }
+            let base_placed = placed >> solve_bits;
+            self.base_order
+                .binary_search_by_key(&base_placed, |(mask, _)| *mask)
+                .map_or(0, |index| self.base_order[index].1 << solve_bits)
         } else {
             self.solve.allowed(placed & ((1u32 << solve_bits) - 1))
         }
