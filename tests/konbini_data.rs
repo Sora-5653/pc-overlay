@@ -104,3 +104,81 @@ fn every_coloured_setup_has_a_buildable_order() {
     }
     assert!(unbuildable.is_empty(), "{unbuildable:?}");
 }
+
+/// The state's PC rate agrees with the sheet when the 2nd PC starts with the
+/// case its ID names (HOLD and the bag's last three), and drops when one
+/// case piece is swapped for another.
+#[test]
+fn state_pc_rate_matches_the_sheet_for_the_named_case() {
+    use pc_overlay_core::{Observation, empty_board, konbini, piece_code};
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("data/konbini");
+    let Ok(library) = KonbiniLibrary::load_dir(&dir) else {
+        eprintln!("skipped: no Setup Konbini cache in {}", dir.display());
+        return;
+    };
+    let piece = |code: char| {
+        *ALL_PIECES
+            .iter()
+            .find(|piece| piece_code(**piece) == code)
+            .unwrap()
+    };
+    let mut finder = Finder::new();
+    let (mut checked, mut below, mut swapped_below) = (0, Vec::new(), 0);
+    let setups = library
+        .setups
+        .iter()
+        .filter(|setup| setup.stage == 2 && setup.sol_percent == Some(100.0))
+        .filter(|setup| setup.id.len() == 4 && setup.id.chars().all(|c| "IJLOSTZ".contains(c)))
+        .take(40);
+    for setup in setups {
+        let case: Vec<Piece> = setup.id.chars().map(piece).collect();
+        // The next bag in one fixed order: Current is case[1] at index 11.
+        let bag = [
+            Piece::S,
+            Piece::Z,
+            Piece::I,
+            Piece::O,
+            Piece::T,
+            Piece::L,
+            Piece::J,
+        ];
+        let rate = |finder: &mut Finder, case: &[Piece]| {
+            let observation = Observation {
+                board: empty_board(),
+                hold: Some(case[0]),
+                current: case[1],
+                next5: [case[2], case[3], bag[0], bag[1], bag[2]],
+            };
+            let progress = setup.progress(&observation.board)?;
+            konbini::state_pc_rate(finder, setup, &progress, &observation, 11)
+        };
+        let Some(named) = rate(&mut finder, &case) else {
+            continue;
+        };
+        checked += 1;
+        if named < 100.0 {
+            below.push(format!("{} {named:.1}%", setup.id));
+        }
+        // The same setup with the HOLD piece swapped for one it does not use.
+        let other = ALL_PIECES
+            .iter()
+            .copied()
+            .find(|piece| !case.contains(piece))
+            .unwrap();
+        let mut swapped = case.clone();
+        swapped[0] = other;
+        if rate(&mut finder, &swapped).is_some_and(|rate| rate < 100.0) {
+            swapped_below += 1;
+        }
+    }
+    eprintln!("checked {checked}, below 100%: {below:?}, swapped below 100%: {swapped_below}");
+    assert!(checked >= 20, "only {checked} setups checked");
+    assert!(
+        below.len() * 10 <= checked,
+        "named cases below 100%: {below:?}"
+    );
+    assert!(
+        swapped_below * 2 >= checked,
+        "swapped below 100%: {swapped_below}/{checked}"
+    );
+}
