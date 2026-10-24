@@ -22,6 +22,10 @@ TETR.IO で **パーフェクトクリア（PC）を続けて取る練習** を�
   形だけを、ミノの色の薄い塗りで表示します。
   - 2 回目の PC（2nd PC）は、Algebruh 氏の資料
     （[`Algebruh's 2nd Methods.md`](Algebruh's%202nd%20Methods.md)）の手順を優先します。
+    その資料が扱わない「奇数 JL・T なし」のケース（IJOS など）は、同じ作者の
+    [`Algebruh's Bad 2nd.md`](Algebruh's%20Bad%202nd.md) の手順を使います。
+  - 7 回目の PC（7th PC）は、Algebruh 氏の
+    [`Algebruh's 7th.md`](Algebruh's%207th.md) の手順を優先します。
   - それ以外の PC と、資料に当てはまる形がないときは、公開スプレッドシート
     「Setup Konbini」の形を使います。
 - **消し方（解）を見せる**: 形が完成したら `S` キーで、残りをどう埋めれば全消しに
@@ -60,7 +64,7 @@ cargo build --release
 | `S` | 形が完成した後、消し方を表示する |
 | `Ctrl+Alt+S` | 消し方の表示 / 非表示を切り替える |
 | `Ctrl+Alt+N` / `Ctrl+Alt+B` | 次 / 前の候補に切り替える |
-| `Ctrl+Alt+K` | 2nd PC で、資料の代わりに Setup Konbini の形を使う |
+| `Ctrl+Alt+K` | 2nd PC と 7th PC で、資料の代わりに Setup Konbini の形を使う |
 | `Ctrl+Alt+F` | Setup Konbini のデータを取り直す |
 | `Ctrl+Alt+1`〜`7` | 何回目の PC かを手で合わせる（数え間違えたとき） |
 
@@ -68,8 +72,8 @@ cargo build --release
 
 - 主な機能はそろっていて、Setup Konbini の形の表示は TETR.IO で試し、問題は
   出ていません。
-- 2nd PC の資料に基づく案内、消し方の表示、`R` でのやり直しの検出などは、自動
-  テストでは確かめていますが、実際の TETR.IO ではまだ試していません。
+- 2nd PC・7th PC の資料に基づく案内、消し方の表示、`R` でのやり直しの検出などは、
+  自動テストでは確かめていますが、実際の TETR.IO ではまだ試していません。
 - TETR.IO のゲームそのものを再現する仕組み（リプレイと完全に一致するエンジン）も
   作っていますが、まだ遊べる形にはなっていません。
 
@@ -78,7 +82,8 @@ cargo build --release
 
 ## 参考にしたもの
 
-- Algebruh 氏の 2nd PC の資料（`Algebruh's 2nd Methods.md`）
+- Algebruh 氏の 2nd PC の資料（`Algebruh's 2nd Methods.md`、`Algebruh's Bad 2nd.md`）
+  と 7th PC の資料（`Algebruh's 7th.md`）
 - [Setup Konbini](https://docs.google.com/spreadsheets/d/1tI9fPeeEEEhWS2h0Gzib5UIjLKN33wd18WQSKRjxYMw/edit)
 - knewjade 氏の solution-finder（消し方の探索の考え方）
 - triangle.js（TETR.IO の回転の規則の表）
@@ -87,5 +92,5 @@ cargo build --release
 
 このツールのプログラムは [MIT ライセンス](LICENSE) で公開しています。
 
-ただし `Algebruh's 2nd Methods.md` は Algebruh 氏の著作物で、MIT ライセンスの
-対象外です。権利は Algebruh 氏にあります。
+ただし `Algebruh's 2nd Methods.md`、`Algebruh's Bad 2nd.md`、`Algebruh's 7th.md` は
+Algebruh 氏の著作物で、MIT ライセンスの対象外です。権利は Algebruh 氏にあります。

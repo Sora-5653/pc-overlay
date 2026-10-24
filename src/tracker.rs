@@ -7,6 +7,18 @@ use crate::{
 
 /// HOLD plus the first playable pieces at a 2nd-PC start form a four-piece case.
 pub const SECOND_PC_CASE_SIZE: usize = 4;
+/// The 7th PC starts with three pieces left in the bag (60 placed = 8 bags + 4).
+pub const SEVENTH_PC_CASE_SIZE: usize = 3;
+
+/// The size of the case a PC starts with, for the PCs the source documents
+/// cover: the 2nd (four pieces) and the 7th (three pieces).
+pub fn case_size(ordinal: PcOrdinal) -> Option<usize> {
+    match ordinal.get() {
+        2 => Some(SECOND_PC_CASE_SIZE),
+        7 => Some(SEVENTH_PC_CASE_SIZE),
+        _ => None,
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct TrackerConfig {
@@ -128,12 +140,13 @@ impl SessionTracker {
     }
 
     /// Rule conditions for the current PC, evaluated over the bag that follows
-    /// the four case pieces. Live HOLD/Current come from the latest snapshot.
+    /// the case pieces (`case_size`). Live HOLD/Current come from the latest
+    /// snapshot. None on a PC without a case.
     pub fn following_bag_context(&self) -> Option<EvalContext> {
         let start = self.current_pc_start()?;
         let latest = self.history.last()?;
         let case_pieces_in_queue =
-            SECOND_PC_CASE_SIZE - usize::from(start.observation.hold.is_some());
+            case_size(start.pc_ordinal)? - usize::from(start.observation.hold.is_some());
         let case_queue: Vec<Piece> = self
             .observed_queue_history
             .iter()
@@ -503,6 +516,41 @@ mod tests {
         );
         assert!(!context.queue_closed);
         assert_eq!(context.current, Piece::L);
+    }
+
+    #[test]
+    fn seventh_pc_case_is_three_pieces() {
+        let mut tracker = tracker();
+        tracker.resync(PcOrdinal::new(6).unwrap());
+        tracker.commit(
+            observation(
+                true,
+                Piece::T,
+                [Piece::Z, Piece::S, Piece::I, Piece::J, Piece::L],
+            ),
+            1.0,
+            1,
+        );
+        // PC 7 starts with HOLD I, so O and T are the two case pieces in queue.
+        tracker.commit(
+            observation(
+                false,
+                Piece::O,
+                [Piece::T, Piece::J, Piece::L, Piece::S, Piece::Z],
+            ),
+            1.0,
+            2,
+        );
+
+        let start = tracker.current_pc_start().expect("PC start observed");
+        assert_eq!(start.pc_ordinal.get(), 7);
+        let context = tracker.following_bag_context().expect("context");
+        assert_eq!(context.case_queue, [Piece::O, Piece::T]);
+        assert_eq!(
+            context.queue_history,
+            [Piece::J, Piece::L, Piece::S, Piece::Z]
+        );
+        assert_eq!(case_size(PcOrdinal::new(1).unwrap()), None);
     }
 
     #[test]

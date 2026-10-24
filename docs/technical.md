@@ -2,8 +2,11 @@
 
 [README](../README.md) から分けた、開発者向けの説明です。要求と基本設計は
 [仕様書](../tetrio_2nd_pc_learning_overlay_spec_v0.1.md)、セットアップの出典は
-[`Algebruh's 2nd Methods.md`](../Algebruh's%202nd%20Methods.md)（英語の原文。後述のツールが
-見出しと行番号を読むため、翻訳していません）にあります。
+[`Algebruh's 2nd Methods.md`](../Algebruh's%202nd%20Methods.md)、その資料が省いた奇数 JL・T なしの
+2nd PC を扱う [`Algebruh's Bad 2nd.md`](../Algebruh's%20Bad%202nd.md)、7th PC の
+[`Algebruh's 7th.md`](../Algebruh's%207th.md)（いずれも英語の原文。後述のツールが
+見出しと行番号を読むため、翻訳していません）にあります。後の 2 つは 2026-10-23 に
+Google ドキュメントから Markdown で書き出して取り込んだものです。
 
 ## 目次
 
@@ -135,8 +138,22 @@
 
 ## 3. 資料全体からのケース自動生成
 
-`tools/build_cases.py` は、元資料の `###` の各節を手で転記せずに
-`data/cases/<CASE>.json`（49 ケース、約 500 セットアップ）に変換する。
+`tools/build_cases.py` は、元資料の各節を手で転記せずに
+`data/cases/<CASE>.json` に変換する。読む資料と節の区切りは `SOURCES` にある:
+
+- `Algebruh's 2nd Methods.md`: `###` の節。49 ケース、約 500 セットアップ。
+- `Algebruh's Bad 2nd.md`: `##` の節（IJOS/ILOZ など 5 節、10 ケース）。見出しの
+  成功率（`(99.95% / 100%)`）は変種として扱わない。
+- `Algebruh's 7th.md`: 7th PC のケースは 3 ミノ（60 個置いた後、バッグに 3 個残る）。
+  見出しのほか「**OJZ, ILZ, OLS, IJS**」のような行もケースの区切りとして読み、
+  最後の `:`・`-`・`(` より後ろがミノ 3 個の名前の並びなら節とする。3 つ以上の
+  ケースを並べた節は、並べたケースの鏡像も加え、セットアップごとにミノが最もよく
+  合うケースと向きへ入れる（解に必要なミノがケースのミノと 1 バッグで足りない向きは
+  入れない）。ケースはミノの組なので、`LZS` と `LSZ` は同じケースとみなす。
+  7th だけの読み方: 節の最初の灰色だけの図は形の説明として飛ばす（LO Locked の
+  image15）。解は 1 バッグ全部なので、同じセルのセットアップはミノが違っても解を
+  共有する（image16〜20）。行が揃うキュー依存のセットアップの解は消えた後の座標で
+  描かれる（JSZ の image112/113）ので、消えた行を戻して読む。
 
 - 埋め込み画像をセルごとに読む（`tools/diagrams.py`）。灰色の文脈のない画像は
   セットアップで、そこにミノを足した後の画像は 2 段階で描いた同じセットアップ
@@ -175,13 +192,13 @@
   セットアップを出す（理由は `likely: ...`）。
 - `run-overlay` は `data/ijlo.json`（手で確かめた IJLO）と `--cases`（既定は
   `data/cases`）の全ファイルを読み、手作業のデータが既に扱うミノのケースは生成分を
-  使わない。ケースは 2nd PC 開始時の HOLD と先頭のミノを並べ替えたものなので、
-  TJJO のような重複のあるケースも認識する。
+  使わない。ケースは PC 開始時の HOLD と先頭のミノを並べ替えたもの（2nd PC は 4 個、
+  7th PC は 3 個。`tracker::case_size`）なので、TJJO のような重複のあるケースも認識する。
 
 ```powershell
 python -I tools/build_cases.py report           # 節ごとの解析の要約
 python -I tools/build_cases.py report TJOO      # 1 ケースの詳細
-python -I tools/build_cases.py write            # data/cases/*.json（約 6 分）
+python -I tools/build_cases.py write            # data/cases/*.json（約 9 分）
 python -I tools/build_cases.py coverage         # セットアップごとのバッグの割合と
                                                 # tests/fixtures/cases_coverage.json
 cargo test --test generated_cases               # 5040 通り全てで Rust の solvable と Python が一致
@@ -305,15 +322,15 @@ OFF に戻り、Undo で前の状態に戻るとその状態の設定に戻る�
 2026-10-21 から、`run-overlay` はモードを切り替えずに 1 つの案内を出す（以前の
 `Ctrl+Alt+K` による Setup Konbini モードはこれに統合した）。
 
-- 2nd PC: 上記の資料のルール（`data/ijlo.json`、`data/cases/*.json`）を優先する。
-  そのケースのデータがないか、盤面とキューに合うセットアップを選べないときは、
-  今のキューで組める 2nd PC の Setup Konbini のセットアップを代わりに出し、詳細行に
-  理由を書く（`guide=Konbini (source: ...)`）。
+- 2nd PC と 7th PC: 上記の資料のルール（`data/ijlo.json`、`data/cases/*.json`）を
+  優先する。そのケースのデータがないか、盤面とキューに合うセットアップを選べない
+  ときは、今のキューで組めるその PC 番号の Setup Konbini のセットアップを代わりに
+  出し、詳細行に理由を書く（`guide=Konbini (source: ...)`）。
 - それ以外の PC: その PC 番号の Setup Konbini のセットアップ。
 - 状態行は出どころを示す: `PC Overlay [source]: ...` か `PC Overlay [Konbini 2nd]: ...`。
   詳細行の末尾は `guide=source` / `guide=Konbini`。
-- 2026-10-22 から、資料のセットアップは引用している行から `Algebruh's 2nd Methods.md` の
-  節の名前も示す:
+- 2026-10-22 から、資料のセットアップは引用している行からその資料（2026-10-23 から
+  Bad 2nd と 7th も）の節の名前も示す:
   `TILS guidance active (tils_image434_m · Odd JL, with T › TIJZ/TILS (mirrored))`。
   `(mirrored)` は節のケースの鏡像として生成したケースの印。資料はリポジトリの
   ルート（ルールの `data/` の親）から読み、見つからなければ節の名前は省く。
@@ -325,7 +342,7 @@ OFF に戻り、Undo で前の状態に戻るとその状態の設定に戻る�
 | `S` / `Ctrl+Alt+S` | セットアップ完成後に解を表示 / 切り替え（従来どおり） |
 | `Ctrl+Alt+1..7` | PC 番号を合わせ直す（従来どおり） |
 | `Ctrl+Alt+N` / `Ctrl+Alt+B` | Setup Konbini の次 / 前の候補。**常に有効になり、新しい PC の開始時に最善の候補へ戻る** |
-| **`Ctrl+Alt+K`** | **以前: Setup Konbini モードの ON/OFF。現在: 資料のルールがあっても 2nd PC で Setup Konbini を使う（もう一度押すと戻る）** |
+| **`Ctrl+Alt+K`** | **以前: Setup Konbini モードの ON/OFF。現在: 資料のルールがあっても 2nd PC・7th PC で Setup Konbini を使う（もう一度押すと戻る）** |
 | `Ctrl+Alt+F` | シートを取り直す（従来どおり） |
 
 ホットキーは、専用スレッドに置いた低レベルのキーボードフック（`WH_KEYBOARD_LL`）で受け取る

@@ -1,4 +1,5 @@
 use std::{
+    collections::{BTreeMap, BTreeSet},
     error::Error,
     fs,
     path::{Path, PathBuf},
@@ -16,6 +17,7 @@ use pc_overlay_core::{
     konbini,
     konbini::{BuildQuery, FoundSolve, KonbiniLibrary, KonbiniProgress},
     piece_code,
+    tracker::case_size,
     window::foreground_handle,
 };
 
@@ -76,13 +78,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut solve_notice: Option<(&'static str, Instant)> = None;
     let mut konbini = KonbiniGuide::new(args.konbini.clone());
     konbini.load_or_fetch();
-    // Ctrl+Alt+K: the 2nd PC uses Setup Konbini even when the source has rules.
+    // Ctrl+Alt+K: the 2nd and 7th PCs use Setup Konbini even when the source has rules.
     let mut prefer_konbini = false;
     // Whether the last stable frame showed a completed setup with a solve.
     let mut solve_available = false;
     let mut overlay = OverlayWindow::new()?;
     println!(
-        "run-overlay started; Ctrl+Alt+1..7 resynchronizes the PC number; S shows / Ctrl+Alt+S toggles the solve once the setup is complete; Ctrl+Alt+N / Ctrl+Alt+B switch setups; Ctrl+Alt+K makes the 2nd PC use Setup Konbini; Ctrl+Alt+F refetches Setup Konbini; press Ctrl+C to stop"
+        "run-overlay started; Ctrl+Alt+1..7 resynchronizes the PC number; S shows / Ctrl+Alt+S toggles the solve once the setup is complete; Ctrl+Alt+N / Ctrl+Alt+B switch setups; Ctrl+Alt+K makes the 2nd and 7th PCs use Setup Konbini; Ctrl+Alt+F refetches Setup Konbini; press Ctrl+C to stop"
     );
 
     loop {
@@ -99,9 +101,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                 Hotkey::Konbini(KonbiniHotkey::PreferKonbini) => {
                     prefer_konbini = !prefer_konbini;
                     let notice = if prefer_konbini {
-                        "2nd PC: Setup Konbini"
+                        "2nd/7th PC: Setup Konbini"
                     } else {
-                        "2nd PC: source rules first"
+                        "2nd/7th PC: source rules first"
                     };
                     eprintln!("{notice}");
                     solve_notice = Some((notice, Instant::now()));
@@ -444,7 +446,7 @@ fn apply_solve_hotkey(
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum KonbiniHotkey {
-    /// Ctrl+Alt+K: the 2nd PC uses Setup Konbini even when the source has
+    /// Ctrl+Alt+K: the 2nd and 7th PCs use Setup Konbini even when the source has
     /// rules for its case (press again to go back).
     PreferKonbini,
     /// Ctrl+Alt+N: the next candidate setup.
@@ -487,7 +489,7 @@ struct Guide {
     pc_rate: Option<f32>,
 }
 
-/// One guidance for every PC. The 2nd PC uses the source rules when they
+/// One guidance for every PC. The 2nd and 7th PCs use the source rules when they
 /// select a setup for the case; otherwise, and on every other PC, a Setup
 /// Konbini setup the live queue can build is shown.
 fn unified_guidance(
@@ -499,7 +501,7 @@ fn unified_guidance(
     prefer_konbini: bool,
 ) -> Guide {
     let mut note = None;
-    if snapshot.pc_ordinal.get() == 2 {
+    if case_size(snapshot.pc_ordinal).is_some() {
         if prefer_konbini {
             note = Some("source rules skipped (Ctrl+Alt+K)".to_string());
         } else {
@@ -1092,8 +1094,9 @@ fn build_overlay_state(
 /// generated cases in `--cases` with the same id are skipped.
 struct Library {
     cases: Vec<RuleSet>,
-    /// Headings of the source document, to name each setup's section.
-    sections: SourceSections,
+    /// Headings of each source document (2nd, Bad 2nd, 7th) by file name, to
+    /// name each setup's section.
+    sections: BTreeMap<String, SourceSections>,
 }
 
 impl Library {
@@ -1123,35 +1126,45 @@ impl Library {
         }
         Ok(Self {
             cases,
-            sections: SourceSections::default(),
+            sections: BTreeMap::new(),
         })
     }
 
-    /// Reads the source document's headings. The rules cite it by file name;
-    /// it sits in the repository root, the parent of the rules' `data/`.
-    /// Without it, setups are shown without their section.
+    /// Reads the headings of every source document the rules cite by file
+    /// name; they sit in the repository root, the parent of the rules'
+    /// `data/`. Without one, its setups are shown without their section.
     fn with_source_sections(mut self, rules_path: &Path) -> Self {
-        let Some(document) = self.cases.first().map(|rules| &rules.case.source.document) else {
-            return self;
-        };
-        let path = rules_path
+        let root = rules_path
             .parent()
             .and_then(Path::parent)
-            .unwrap_or(Path::new("."))
-            .join(document);
-        match SourceSections::load(&path) {
-            Ok(sections) => self.sections = sections,
-            Err(error) => eprintln!(
-                "warning: {}: {error}; setups are shown without their source section",
-                path.display()
-            ),
+            .unwrap_or(Path::new("."));
+        let documents: BTreeSet<String> = self
+            .cases
+            .iter()
+            .map(|rules| rules.case.source.document.clone())
+            .collect();
+        for document in documents {
+            let path = root.join(&document);
+            match SourceSections::load(&path) {
+                Ok(sections) => {
+                    self.sections.insert(document, sections);
+                }
+                Err(error) => eprintln!(
+                    "warning: {}: {error}; setups are shown without their source section",
+                    path.display()
+                ),
+            }
         }
         self
     }
 
     /// ` · Odd JL, with T › TIJZ/TILS (mirrored)` for a setup, or empty.
     fn source_label(&self, setup: &pc_overlay_core::rules::SetupRule) -> String {
-        let Some(section) = self.sections.section(setup.source.lines[0]) else {
+        let Some(section) = self
+            .sections
+            .get(&setup.source.document)
+            .and_then(|sections| sections.section(setup.source.lines[0]))
+        else {
             return String::new();
         };
         // Generated cases mirror the source's case with an `_m` id.
@@ -1171,13 +1184,11 @@ impl Library {
             .join(" ")
     }
 
-    /// The rules for the case the tracked 2nd PC started with.
+    /// The rules for the case the tracked 2nd or 7th PC started with.
     fn for_tracker(&self, tracker: &SessionTracker) -> Option<&RuleSet> {
         let start = tracker.current_pc_start()?;
-        if start.pc_ordinal.get() != 2 {
-            return None;
-        }
-        let key = observation_case(&start.observation);
+        let size = case_size(start.pc_ordinal)?;
+        let key = observation_case(&start.observation, size);
         self.cases
             .iter()
             .find(|rules| case_key(&rules.case.id) == key)
@@ -1248,7 +1259,7 @@ fn render_stage(
     let case = library
         .for_tracker(tracker)
         .map(|rules| rules.case.id.as_str())
-        .unwrap_or("2nd PC");
+        .unwrap_or("source PC");
     let setup = match stage {
         GuidanceStage::Inactive(message) => return (message, Vec::new()),
         GuidanceStage::SetupComplete {
@@ -1305,25 +1316,26 @@ fn guidance_stage<'a>(
     snapshot: &pc_overlay_core::tracker::Snapshot,
     reviewed_only: bool,
 ) -> GuidanceStage<'a> {
-    if snapshot.pc_ordinal.get() != 2 {
+    let ordinal = snapshot.pc_ordinal.get();
+    let Some(size) = case_size(snapshot.pc_ordinal) else {
         return GuidanceStage::Inactive(format!(
-            "PC Overlay: tracking PC {}; 2nd-PC guidance activates on PC 2",
-            snapshot.pc_ordinal.get()
+            "PC Overlay: tracking PC {ordinal}; source guidance activates on PC 2 and PC 7"
         ));
-    }
+    };
     let Some(rules) = library.for_tracker(tracker) else {
         let case = tracker
             .current_pc_start()
-            .map(|start| observation_case(&start.observation))
+            .map(|start| observation_case(&start.observation, size))
             .unwrap_or_default();
+        let count = if size == 3 { "three" } else { "four" };
         return GuidanceStage::Inactive(format!(
-            "PC Overlay: PC 2 detected, no data for the four-piece case {case}"
+            "PC Overlay: PC {ordinal} detected, no data for the {count}-piece case {case}"
         ));
     };
     let case = rules.case.id.as_str();
 
     let Some(context) = tracker.following_bag_context() else {
-        return GuidanceStage::Inactive("PC Overlay: PC 2 start was not observed".to_string());
+        return GuidanceStage::Inactive(format!("PC Overlay: PC {ordinal} start was not observed"));
     };
     let report = if reviewed_only {
         rules.select_for_board(&context, &snapshot.observation.board)
@@ -1408,10 +1420,11 @@ fn plan_cells(plan: pc_overlay_core::OverlayPlan, current: Piece) -> Vec<Overlay
     cells
 }
 
-/// The 2nd-PC case consists of HOLD plus the first pieces that can be played,
-/// independent of their order: returned sorted, as `case_key` sorts ids.
-fn observation_case(observation: &pc_overlay_core::Observation) -> String {
-    let mut pieces = Vec::with_capacity(4);
+/// A PC's case consists of HOLD plus the first pieces that can be played,
+/// `size` in all (`case_size`), independent of their order: returned sorted,
+/// as `case_key` sorts ids.
+fn observation_case(observation: &pc_overlay_core::Observation, size: usize) -> String {
+    let mut pieces = Vec::with_capacity(size);
     if let Some(hold) = observation.hold {
         pieces.push(hold);
     }
@@ -1421,7 +1434,7 @@ fn observation_case(observation: &pc_overlay_core::Observation) -> String {
             .next5
             .iter()
             .copied()
-            .take(4usize.saturating_sub(pieces.len())),
+            .take(size.saturating_sub(pieces.len())),
     );
     let mut letters: Vec<char> = pieces.into_iter().map(piece_code).collect();
     letters.sort_unstable();
@@ -1516,37 +1529,61 @@ mod tests {
     fn case_uses_hold_current_and_earliest_next_pieces() {
         let ijlo = case_key("IJLO");
         assert_eq!(
-            observation_case(&observation(
-                Some(Piece::I),
-                Piece::J,
-                [Piece::L, Piece::O, Piece::S, Piece::Z, Piece::T],
-            )),
+            observation_case(
+                &observation(
+                    Some(Piece::I),
+                    Piece::J,
+                    [Piece::L, Piece::O, Piece::S, Piece::Z, Piece::T],
+                ),
+                4
+            ),
             ijlo
         );
         assert_eq!(
-            observation_case(&observation(
-                Some(Piece::I),
-                Piece::J,
-                [Piece::L, Piece::S, Piece::O, Piece::Z, Piece::T],
-            )),
+            observation_case(
+                &observation(
+                    Some(Piece::I),
+                    Piece::J,
+                    [Piece::L, Piece::S, Piece::O, Piece::Z, Piece::T],
+                ),
+                4
+            ),
             case_key("IJLS")
         );
         assert_eq!(
-            observation_case(&observation(
-                None,
-                Piece::O,
-                [Piece::L, Piece::I, Piece::J, Piece::S, Piece::Z],
-            )),
+            observation_case(
+                &observation(
+                    None,
+                    Piece::O,
+                    [Piece::L, Piece::I, Piece::J, Piece::S, Piece::Z],
+                ),
+                4
+            ),
             ijlo
         );
         // Duplicate pieces from two bags form cases such as TJJO.
         assert_eq!(
-            observation_case(&observation(
-                None,
-                Piece::J,
-                [Piece::T, Piece::O, Piece::J, Piece::S, Piece::Z],
-            )),
+            observation_case(
+                &observation(
+                    None,
+                    Piece::J,
+                    [Piece::T, Piece::O, Piece::J, Piece::S, Piece::Z],
+                ),
+                4
+            ),
             case_key("TJJO")
+        );
+        // The 7th PC starts with a three-piece case.
+        assert_eq!(
+            observation_case(
+                &observation(
+                    Some(Piece::T),
+                    Piece::O,
+                    [Piece::I, Piece::J, Piece::S, Piece::Z, Piece::L],
+                ),
+                3
+            ),
+            case_key("TIO")
         );
     }
 
@@ -1586,6 +1623,52 @@ mod tests {
         let snapshot = tracker.snapshots().last().unwrap();
         let (status, cells) = guidance_for_snapshot(&library, &tracker, snapshot, true);
         assert!(status.contains("TIOS guidance active"), "{status}");
+        assert!(!cells.is_empty());
+    }
+
+    /// The tracked PC `ordinal` starts on an empty board with this queue.
+    fn tracker_at_pc_start(ordinal: u8, current: Piece, next5: [Piece; 5]) -> SessionTracker {
+        let mut tracker = SessionTracker::new(TrackerConfig::default());
+        tracker.resync(pc_overlay_core::PcOrdinal::new(ordinal - 1).unwrap());
+        let mut filled = observation(None, current, next5);
+        filled.board[0][0] = Some(Piece::T);
+        tracker.commit(filled, 0.75, 1);
+        tracker.commit(observation(None, current, next5), 0.75, 2);
+        assert_eq!(
+            tracker.snapshots().last().unwrap().pc_ordinal.get(),
+            ordinal
+        );
+        tracker
+    }
+
+    #[test]
+    fn bad_second_and_seventh_cases_get_source_guidance() {
+        let library = Library::load(ijlo_only(), &root().join("data/cases"))
+            .unwrap()
+            .with_source_sections(&root().join("data/ijlo.json"));
+
+        // IJOS, from "Algebruh's Bad 2nd".
+        let tracker = tracker_at_pc_start(
+            2,
+            Piece::I,
+            [Piece::J, Piece::O, Piece::S, Piece::T, Piece::L],
+        );
+        let snapshot = tracker.snapshots().last().unwrap();
+        let (status, cells) = guidance_for_snapshot(&library, &tracker, snapshot, true);
+        assert!(status.contains("IJOS guidance active"), "{status}");
+        assert!(status.contains("IJOS/ILOZ"), "{status}");
+        assert!(!cells.is_empty());
+
+        // TIO, a three-piece case from "Algebruh's 7th".
+        let tracker = tracker_at_pc_start(
+            7,
+            Piece::T,
+            [Piece::I, Piece::O, Piece::S, Piece::J, Piece::L],
+        );
+        let snapshot = tracker.snapshots().last().unwrap();
+        let (status, cells) = guidance_for_snapshot(&library, &tracker, snapshot, true);
+        assert!(status.contains("TIO guidance active"), "{status}");
+        assert!(status.contains("With T"), "{status}");
         assert!(!cells.is_empty());
     }
 
@@ -1647,7 +1730,7 @@ mod tests {
     fn ijlo_rules() -> Library {
         Library {
             cases: vec![ijlo_only()],
-            sections: SourceSections::default(),
+            sections: BTreeMap::new(),
         }
     }
 
