@@ -99,6 +99,29 @@ impl PcOrdinal {
         Self(((pieces / 10) % 7) as u8 + 1)
     }
 
+    /// The PC that starts after `pieces` placements, when every PC took a
+    /// multiple of 5 pieces (10 for 4 lines, 5 for a 2-line PC). The 7-bag
+    /// position (`pieces mod 7`) decides it: the k-th PC of a 10-piece loop
+    /// starts at 3(k - 1) mod 7, so k - 1 = 5 * position mod 7 (5 is the
+    /// inverse of 3). `None` when `pieces` cannot be a PC start.
+    pub const fn at_pc_start(pieces: u32) -> Option<Self> {
+        if !pieces.is_multiple_of(5) {
+            return None;
+        }
+        Some(Self(((pieces % 7) * 5 % 7) as u8 + 1))
+    }
+
+    /// The PC after this one, which took `placed` pieces. A 2-line PC
+    /// (5 pieces) moves the 7-bag as far as four 4-line PCs, so it advances
+    /// the number by 4. Counts that are not a multiple of 5 advance by one.
+    pub const fn after_pieces(self, placed: usize) -> Self {
+        if placed == 0 || !placed.is_multiple_of(5) {
+            return self.advance();
+        }
+        let position = (3 * (self.0 as usize - 1) + placed) % 7;
+        Self((position * 5 % 7) as u8 + 1)
+    }
+
     pub const fn get(self) -> u8 {
         self.0
     }
@@ -141,6 +164,46 @@ mod tests {
         assert_eq!(ordinal(69), 7);
         assert_eq!(ordinal(70), 1);
         assert_eq!(ordinal(125), 6);
+    }
+
+    #[test]
+    fn ordinal_at_pc_start_follows_the_bag_position() {
+        let at = |pieces| PcOrdinal::at_pc_start(pieces).map(PcOrdinal::get);
+        // Every 10-piece PC start agrees with the 10-per-PC count.
+        for pieces in (0..140).step_by(10) {
+            assert_eq!(
+                at(pieces),
+                Some(PcOrdinal::from_pieces_placed(pieces).get())
+            );
+        }
+        // A 2-line PC first: 5 pieces is where the 5th PC starts.
+        assert_eq!(at(5), Some(5));
+        assert_eq!(at(15), Some(6));
+        assert_eq!(at(7), None);
+    }
+
+    #[test]
+    fn a_two_line_pc_advances_the_ordinal_by_four() {
+        let after = |ordinal, placed| PcOrdinal::new(ordinal).unwrap().after_pieces(placed).get();
+        assert_eq!(after(1, 5), 5);
+        assert_eq!(after(2, 5), 6);
+        assert_eq!(after(5, 5), 2);
+        assert_eq!(after(7, 5), 4);
+        for ordinal in 1..=7 {
+            assert_eq!(
+                after(ordinal, 10),
+                PcOrdinal::new(ordinal).unwrap().advance().get()
+            );
+            // An unknown or odd count keeps the one-step count.
+            assert_eq!(
+                after(ordinal, 0),
+                PcOrdinal::new(ordinal).unwrap().advance().get()
+            );
+            assert_eq!(
+                after(ordinal, 9),
+                PcOrdinal::new(ordinal).unwrap().advance().get()
+            );
+        }
     }
 
     #[test]

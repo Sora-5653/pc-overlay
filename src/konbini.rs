@@ -279,6 +279,35 @@ pub fn find_perfect_clears(
         .collect()
 }
 
+/// 2-line perfect clears (5 pieces) from the live board with its HOLD,
+/// Current, and NEXT: empty when the board is above the bottom two rows or
+/// the shown pieces cannot fill them. Only `IJLOO`, `IILLO`, `IIJJO`, and
+/// `JJLLO` tile two rows, so no piece filter is needed. A 2-line PC moves the
+/// PC number by four (`PcOrdinal::after_pieces`).
+pub fn find_two_line_perfect_clears(
+    finder: &mut Finder,
+    observation: &Observation,
+    limit: usize,
+) -> Vec<FoundSolve> {
+    let Some(field) = board_field(&observation.board) else {
+        return Vec::new();
+    };
+    let target = Target::perfect_clear(2).expect("2 rows fit the field");
+    if field & !target.cells != 0 {
+        return Vec::new();
+    }
+    let queue = visible_queue(observation);
+    let supply = Supply::Queue {
+        hold: observation.hold,
+        queue: &queue,
+    };
+    finder
+        .solutions(&target, field, supply, limit)
+        .into_iter()
+        .filter_map(|steps| FoundSolve::new(&observation.board, 2, steps))
+        .collect()
+}
+
 /// The drawing cells already placed, and the rest as cells of the live
 /// board (after line clears).
 #[derive(Debug, Clone, PartialEq)]
@@ -697,6 +726,76 @@ mod tests {
         library.add_stage_csv(stage, text);
         assert!(library.issues.is_empty(), "{:?}", library.issues);
         library
+    }
+
+    #[test]
+    fn only_four_piece_sets_tile_two_lines() {
+        let mut finder = Finder::new();
+        let target = Target::perfect_clear(2).unwrap();
+        let mut sets = Vec::new();
+        // Every 5 pieces with at most two of each, as a 7-bag can deal.
+        for code in 0..3u32.pow(7) {
+            let counts: [u8; 7] = std::array::from_fn(|i| (code / 3u32.pow(i as u32) % 3) as u8);
+            if counts.iter().sum::<u8>() != 5 {
+                continue;
+            }
+            if !finder
+                .solutions(&target, 0, Supply::AnyOrder(counts), 1)
+                .is_empty()
+            {
+                let name: String = finder::ALL_PIECES
+                    .iter()
+                    .zip(counts)
+                    .flat_map(|(piece, count)| {
+                        std::iter::repeat_n(format!("{piece:?}"), usize::from(count))
+                    })
+                    .collect();
+                sets.push(name);
+            }
+        }
+        sets.sort();
+        assert_eq!(sets, ["IIJJO", "IILLO", "IJLOO", "JJLLO"]);
+    }
+
+    fn on_empty(hold: Option<Piece>, current: Piece, next5: [Piece; 5]) -> Observation {
+        Observation {
+            board: empty_board(),
+            hold,
+            current,
+            next5,
+        }
+    }
+
+    #[test]
+    fn two_line_perfect_clears_use_the_shown_pieces() {
+        use Piece::*;
+        let mut finder = Finder::new();
+        let ooilj = on_empty(Some(O), I, [L, T, J, O, S]);
+        let found = find_two_line_perfect_clears(&mut finder, &ooilj, 100);
+        assert!(!found.is_empty());
+        for solve in &found {
+            assert_eq!(solve.height, 2);
+            let mut pieces: Vec<Piece> = solve.steps.iter().map(|(piece, _)| *piece).collect();
+            pieces.sort_by_key(|piece| format!("{piece:?}"));
+            assert_eq!(pieces, [I, J, L, O, O]);
+        }
+        // The second O comes after the five shown: not with HOLD + NEXT.
+        let late = on_empty(None, O, [I, L, T, J, S]);
+        assert!(find_two_line_perfect_clears(&mut finder, &late, 100).is_empty());
+        // A block above the bottom two rows.
+        let mut high = ooilj.clone();
+        high.board[2][0] = Some(T);
+        assert!(find_two_line_perfect_clears(&mut finder, &high, 100).is_empty());
+        // A started 2-line PC is still found, and a contradicting board is not.
+        let mut started = ooilj.clone();
+        started.board[0][0] = Some(O);
+        started.board[0][1] = Some(O);
+        started.board[1][0] = Some(O);
+        started.board[1][1] = Some(O);
+        assert!(!find_two_line_perfect_clears(&mut finder, &started, 100).is_empty());
+        let mut off = ooilj;
+        off.board[0][0] = Some(T);
+        assert!(find_two_line_perfect_clears(&mut finder, &off, 100).is_empty());
     }
 
     #[test]

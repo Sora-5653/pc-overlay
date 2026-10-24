@@ -303,17 +303,21 @@ impl SessionTracker {
                 .expect("a PC boundary has a previous state");
             // A PC is counted even when the queue does not continue; the game
             // queue then starts a fresh segment, so a later Undo stops there.
-            self.game_queue = append_revealed(
+            let placed = match append_revealed(
                 &self.game_queue,
                 &last.observation.next5,
                 &observation.next5,
-            )
-            .unwrap_or_else(|| {
-                let mut queue = std::mem::take(&mut self.game_queue);
-                queue.extend(seed_queue(&observation));
-                queue
-            });
-            self.pc_ordinal = self.pc_ordinal.advance();
+            ) {
+                Some(queue) => {
+                    self.game_queue = queue;
+                    self.placed_since_pc_start(self.game_queue.len(), observation.hold)
+                }
+                None => {
+                    self.game_queue.extend(seed_queue(&observation));
+                    None
+                }
+            };
+            self.pc_ordinal = self.pc_ordinal.after_pieces(placed.unwrap_or(0));
             self.observed_queue_history = seed_queue(&observation);
             self.guidance = GuidanceState::default();
         } else if let Some(last) = self.history.last() {
@@ -382,7 +386,8 @@ impl SessionTracker {
         // Undo can stop just after a PC whose empty board never became
         // stable: the target is still in the previous PC.
         if !board_is_empty(&target.observation.board) && board_is_empty(&observation.board) {
-            self.pc_ordinal = self.pc_ordinal.advance();
+            let placed = self.placed_since_pc_start(position, observation.hold);
+            self.pc_ordinal = self.pc_ordinal.after_pieces(placed.unwrap_or(0));
             self.observed_queue_history = seed_queue(&observation);
             self.guidance = GuidanceState::default();
         } else {
@@ -392,6 +397,37 @@ impl SessionTracker {
         self.game_queue.truncate(position);
         let snapshot = self.push_snapshot(observation, recognition_confidence, timestamp_ms);
         CommitOutcome::RolledBack { steps, snapshot }
+    }
+
+    /// Pieces placed in the current PC up to a state whose NEXT5 ends at
+    /// `queue_end` with `hold`: the queue advanced since the PC start, less
+    /// the one piece the game's first HOLD takes without a placement. `None`
+    /// when the PC start was not seen (a resync or a start mid-PC).
+    fn placed_since_pc_start(&self, queue_end: usize, hold: Option<Piece>) -> Option<usize> {
+        let start = self.current_pc_start()?;
+        if !board_is_empty(&start.observation.board) {
+            return None;
+        }
+        let first_hold = usize::from(start.observation.hold.is_none() && hold.is_some());
+        queue_end
+            .checked_sub(start.queue_end)?
+            .checked_sub(first_hold)
+    }
+
+    /// The PC number the game's PIECES counter gives for the latest state:
+    /// the pieces before the current PC are the counter less the pieces
+    /// placed in it, which a 2-line PC (5 pieces) keeps off the multiples of
+    /// 10. Without a seen PC start, the 10-per-PC count. `None` when the
+    /// counter and the tracked state disagree (a frame of one and not the
+    /// other).
+    pub fn ordinal_from_pieces(&self, pieces: u32) -> Option<PcOrdinal> {
+        let Some(latest) = self.history.last() else {
+            return Some(PcOrdinal::from_pieces_placed(pieces));
+        };
+        match self.placed_since_pc_start(latest.queue_end, latest.observation.hold) {
+            Some(placed) => PcOrdinal::at_pc_start(pieces.checked_sub(placed as u32)?),
+            None => Some(PcOrdinal::from_pieces_placed(pieces)),
+        }
     }
 
     fn push_snapshot(
@@ -947,12 +983,55 @@ mod tests {
     }
 
     #[test]
+    fn a_two_line_pc_counts_four_pcs_and_undo_restores_it() {
+        let mut tracker = tracker();
+        tracker.commit(at(0, false), 1.0, 1);
+        tracker.commit(at(2, true), 1.0, 2);
+        // Five pieces from the empty start: a 2-line PC.
+        tracker.commit(at(5, false), 1.0, 3);
+        assert_eq!(tracker.pc_ordinal().get(), 5);
+        assert_rolled_back(tracker.commit(at(2, true), 1.0, 4), 1);
+        assert_eq!(tracker.pc_ordinal().get(), 1);
+        // Undo stopping on the empty board after the PC (never stable)
+        // counts the same four.
+        tracker.commit(at(4, true), 1.0, 5);
+        tracker.commit(at(6, true), 1.0, 6);
+        assert_rolled_back(tracker.commit(at(5, false), 1.0, 7), 1);
+        assert_eq!(tracker.pc_ordinal().get(), 5);
+    }
+
+    #[test]
+    fn a_pc_start_not_seen_keeps_the_one_step_count() {
+        let mut tracker = tracker();
+        // Tracking began mid-PC, so the pieces of the PC are unknown.
+        tracker.commit(at(0, true), 1.0, 1);
+        tracker.commit(at(5, false), 1.0, 2);
+        assert_eq!(tracker.pc_ordinal().get(), 2);
+    }
+
+    #[test]
+    fn pieces_counter_gives_the_ordinal_after_a_two_line_pc() {
+        let mut tracker = tracker();
+        assert_eq!(tracker.ordinal_from_pieces(25).map(PcOrdinal::get), Some(3));
+        tracker.commit(at(0, false), 1.0, 1);
+        tracker.commit(at(3, true), 1.0, 2);
+        tracker.commit(at(5, false), 1.0, 3);
+        tracker.commit(at(7, true), 1.0, 4);
+        // PIECES 7: five before this PC and two in it, the 5th PC.
+        assert_eq!(tracker.ordinal_from_pieces(7).map(PcOrdinal::get), Some(5));
+        // A counter one frame ahead of the tracked state does not align.
+        assert_eq!(tracker.ordinal_from_pieces(8), None);
+        assert_eq!(tracker.ordinal_from_pieces(1), None);
+    }
+
+    #[test]
     fn undo_far_back_within_the_game_restores_the_earlier_pc() {
         let mut tracker = tracker();
         tracker.commit(at(0, true), 1.0, 1);
         tracker.commit(at(3, false), 1.0, 2);
         tracker.commit(at(5, true), 1.0, 3);
-        tracker.commit(at(8, false), 1.0, 4);
+        // Six pieces: five would be a 2-line PC, which counts four PCs.
+        tracker.commit(at(9, false), 1.0, 4);
         tracker.commit(at(10, true), 1.0, 5);
         assert_eq!(tracker.pc_ordinal().get(), 3);
 
