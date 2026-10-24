@@ -259,6 +259,7 @@ fn commit_name(commit: &CommitOutcome) -> &'static str {
         CommitOutcome::RejectedHistoryDiscontinuity => "history_discontinuity",
         CommitOutcome::RolledBack { .. } => "rolled_back",
         CommitOutcome::NewGame { .. } => "new_game",
+        CommitOutcome::Resynced { .. } => "resynced",
     }
 }
 
