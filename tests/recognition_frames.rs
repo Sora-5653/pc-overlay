@@ -10,7 +10,11 @@
 
 use std::path::Path;
 
-use pc_overlay_core::{BoardCalibration, CapturedFrame, Piece, RecognizerConfig, TetrioRecognizer};
+use pc_overlay_core::{
+    BoardCalibration, CapturedFrame, CommitOutcome, Piece, RecognizerConfig, SessionTracker,
+    StabilityConfig, StabilityFilter, StabilityOutcome, TetrioRecognizer, TrackerConfig,
+    board_is_empty,
+};
 
 const FRAME_WIDTH: u32 = 1920;
 const FRAME_HEIGHT: u32 = 1009;
@@ -154,12 +158,59 @@ fn dimmed_hold_piece_is_read_by_shape() {
 }
 
 #[test]
-fn all_clear_banner_pauses_recognition() {
+fn all_clear_banner_reads_as_an_empty_board() {
+    // Right after a PC the yellow ALL CLEAR text covers rows 8-12. It reads
+    // as O cells, which used to pause recognition until it faded.
     let result = recognizer()
         .recognize(&load_fixture("zen_000008.bmp"))
         .unwrap();
-    assert!(result.observation.is_none());
-    assert_eq!(result.current, Some(Piece::T));
+    assert!(result.all_clear_banner);
+    assert!(result.confidence >= 0.70, "{}", result.confidence);
+    let observation = result.observation.expect("complete observation");
+    assert!(board_is_empty(&observation.board));
+    assert_eq!(observation.current, Piece::T);
+    assert_eq!(observation.hold, Some(Piece::J));
+    assert_eq!(observation.next5, queue("LJIOS"));
+}
+
+#[test]
+fn all_clear_banner_frames_start_the_next_pc() {
+    let result = recognizer()
+        .recognize(&load_fixture("zen_000008.bmp"))
+        .unwrap();
+    let cleared = result.observation.unwrap();
+    // The state before the last placement: one piece earlier in the queue.
+    let mut before = cleared.clone();
+    before.current = Piece::Z;
+    before.next5 = queue("TLJIO");
+    before.board[0] = [Some(Piece::I); 10];
+    before.board[0][9] = None;
+
+    let mut stability = StabilityFilter::new(StabilityConfig::default());
+    let mut tracker = SessionTracker::new(TrackerConfig::default());
+    for _ in 0..3 {
+        stability.ingest(before.clone(), 0.9);
+    }
+    tracker.commit(before, 0.9, 0);
+    let pc = tracker.pc_ordinal();
+
+    let mut outcome = None;
+    for _ in 0..3 {
+        outcome = Some(stability.ingest(cleared.clone(), result.confidence));
+    }
+    let Some(StabilityOutcome::Stable {
+        observation,
+        confidence,
+    }) = outcome
+    else {
+        panic!("{outcome:?}");
+    };
+    let commit = tracker.commit((*observation).clone(), confidence, 1);
+    assert!(
+        matches!(commit, CommitOutcome::Accepted { .. }),
+        "{commit:?}"
+    );
+    assert_eq!(tracker.pc_ordinal().get(), pc.get() + 1);
 }
 
 #[test]
