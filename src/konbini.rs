@@ -382,9 +382,8 @@ pub fn staged_moves(
     // One piece may stay in HOLD; without HOLD yet, the queue gives it.
     let length = pieces + usize::from(observation.hold.is_none());
     let queue = visible_queue(observation);
-    // A built setup needs at most the piece past NEXT. Two took up to
-    // 0.25 s and nine 7 s (`examples/staged_time.rs`), for boards far from
-    // their perfect clear.
+    // A built setup needs at most the piece past NEXT. Keep the search
+    // bounded for boards still far from their perfect clear.
     if length > queue.len() + STAGED_UNSEEN {
         return Vec::new();
     }
@@ -407,32 +406,25 @@ pub fn staged_moves(
         Some(_) => {}
         None => firsts.push((observation.next5[0], Some(current), 2)),
     }
-    let mut outcomes: HashMap<(Mask, Option<Piece>, Vec<Piece>), bool> = HashMap::new();
+    let mut outcomes: HashMap<(Mask, Option<Piece>, usize), usize> = HashMap::new();
     let mut staged = Vec::new();
     for (piece, hold, next) in firsts {
         for &cells in finder.moves(field, piece).iter() {
             let after = clear_full_rows(field | cells);
-            let cleared = completions
-                .iter()
-                .filter(|queue| {
-                    let rest = queue[next.min(queue.len())..].to_vec();
-                    *outcomes.entry((after, hold, rest)).or_insert_with_key(
-                        |(after, hold, rest)| {
-                            *after == 0
-                                || finder
-                                    .perfect_clears(
-                                        *after,
-                                        Supply::Queue {
-                                            hold: *hold,
-                                            queue: rest,
-                                        },
-                                        1,
-                                    )
-                                    .is_some()
-                        },
-                    )
-                })
-                .count();
+            let cleared = *outcomes.entry((after, hold, next)).or_insert_with(|| {
+                if after == 0 {
+                    return completions.len();
+                }
+                let queues: Vec<&[Piece]> = completions
+                    .iter()
+                    .map(|queue| &queue[next.min(queue.len())..])
+                    .collect();
+                finder
+                    .perfect_clear_queues(after, hold, &queues)
+                    .into_iter()
+                    .filter(|found| *found)
+                    .count()
+            });
             if cleared > 0 {
                 staged.push(StagedMove {
                     piece,
@@ -449,7 +441,9 @@ pub fn staged_moves(
 }
 
 /// Pieces past NEXT `staged_moves` looks at most.
-pub const STAGED_UNSEEN: usize = 1;
+/// With two, `staged_time` measured 13 ms mean and 32 ms worst for two
+/// pieces placed, down from 115 ms mean and 242 ms worst.
+pub const STAGED_UNSEEN: usize = 2;
 
 /// `field` with its full rows removed and the rows above dropped.
 fn clear_full_rows(field: Mask) -> Mask {

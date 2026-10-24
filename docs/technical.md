@@ -529,9 +529,13 @@ NEXT はそのうち 6 個しか見せない。`cargo run --release --example ko
   状態行は `no perfect clear with HOLD + NEXT yet; press S for the next placement (a PC stays
   in 2/2 orders)`、`S` の後は `place Z first 1/N: a PC stays in 2/2 orders after NEXT`
   （HOLD のミノなら `from HOLD` を付ける）。`Ctrl+Alt+N` / `Ctrl+Alt+B` で他の置き場所に
-  切り替える。置くと状態が変わり、見えたミノで解を探し直す。NEXT の先が 2 個以上要る盤面は
-  探さない（`STAGED_UNSEEN`）。2 個で最悪 0.25 秒、9 個で 7 秒かかった
-  （`cargo run --release --example staged_time`）。例: 4th PC で LZ-ISO を組み、HOLD T、
+  切り替える。置くと状態が変わり、見えたミノで解を探し直す。NEXT の先が 3 個以上要る盤面は
+  探さない（`STAGED_UNSEEN`）。置き場所ごとの PC 判定は、残りのミノの並び全てで敷き詰めの
+  探索を 1 回にまとめ（`Finder::perfect_clear_queues`、並びごとに打てるかだけを確かめる）、
+  上から真っすぐ落とせる置き場所は手生成を省く（`Finder::can_lock`）。これで NEXT の先が
+  2 個の盤面は平均 115 ms・最悪 0.25 秒から平均 14 ms・最悪 36 ms になった
+  （`cargo run --release --example staged_time`、結果のハッシュは変更前と一致）。
+  9 個先まで見る盤面は 7 秒かかるので探さない。例: 4th PC で LZ-ISO を組み、HOLD T、
   Current Z、NEXT ITSZJ のとき、見えているミノでは解がないが、J の後の L・O の 2 通りの
   どちらでも PC が残る置き方がある。
 

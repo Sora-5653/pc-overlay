@@ -7,7 +7,10 @@ use pc_overlay_core::{
     finder::{ALL_PIECES, Finder},
     konbini,
 };
-use std::time::Instant;
+use std::{
+    hash::{DefaultHasher, Hash, Hasher},
+    time::Instant,
+};
 fn main() {
     let mut seed: u64 = 1357;
     let mut random = move |bound: usize| {
@@ -18,6 +21,7 @@ fn main() {
     };
     let mut finder = Finder::new();
     for placed in [1usize, 2, 3, 5] {
+        let mut results = DefaultHasher::new();
         let (mut worst, mut total, mut n) = (0f64, 0f64, 0);
         for _ in 0..20 {
             let mut dealt = Vec::new();
@@ -52,15 +56,16 @@ fn main() {
             worst = worst.max(ms);
             total += ms;
             n += 1;
-            let _ = moves;
+            format!("{moves:?}").hash(&mut results);
             if finder.cached_moves() > 200_000 {
                 finder.clear_cache();
             }
         }
         println!(
-            "{placed} placed: mean {:.0} ms, worst {:.0} ms",
+            "{placed} placed: mean {:.2} ms, worst {:.2} ms, results {:016x}",
             total / n as f64,
-            worst
+            worst,
+            results.finish()
         );
     }
 }
