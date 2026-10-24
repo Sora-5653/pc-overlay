@@ -346,31 +346,6 @@ impl SessionTracker {
             };
         }
 
-        if key == Some(GameKey::Undo)
-            && let Some(index) = self.history.iter().rposition(|snapshot| {
-                let seen = &snapshot.observation;
-                seen.board == observation.board
-                    && seen.current == observation.current
-                    && seen.next5 == observation.next5
-            })
-        {
-            // The same state but HOLD: TETR.IO kept or restored a different
-            // HOLD than the one tracked. The screen's HOLD is what holds now.
-            let steps = self.history.len() - 1 - index;
-            self.history.truncate(index + 1);
-            let target = self.history.last_mut().expect("rollback target exists");
-            target.observation = observation;
-            target.guidance.advance_solve_after_undo();
-            self.pc_ordinal = target.pc_ordinal;
-            self.observed_queue_history = target.observed_queue_history.clone();
-            self.game_queue.truncate(target.queue_end);
-            self.guidance = target.guidance.clone();
-            return CommitOutcome::RolledBack {
-                steps,
-                snapshot: target.clone(),
-            };
-        }
-
         if key != Some(GameKey::Redo)
             && let Some((index, position)) =
                 self.undo_target(&observation, key == Some(GameKey::Undo))
@@ -503,8 +478,8 @@ impl SessionTracker {
     /// window of the game queue, and the newest snapshot at or before that
     /// window is where the undone placements began. Returns that snapshot's
     /// index and the queue position the observation's NEXT5 ends at.
-    /// `undo_pressed` (Ctrl+Z was seen) drops the two guards below that tell
-    /// an undo from other changes without the key.
+    /// `undo_pressed` (Ctrl+Z was seen) drops the NEXT-overlap guard below,
+    /// which tells an undo from play forward without the key.
     fn undo_target(&self, observation: &Observation, undo_pressed: bool) -> Option<(usize, usize)> {
         let last = self.history.last()?;
         // One or two placements forward keep three or more NEXT pieces in
@@ -523,13 +498,10 @@ impl SessionTracker {
             .history
             .iter()
             .rposition(|snapshot| snapshot.queue_end <= position)?;
-        // HOLD never empties within a game, so an empty HOLD where the
-        // target had one is a restart, not an undo; unless Ctrl+Z was
-        // pressed, since TETR.IO's undo may restore HOLD.
-        if !undo_pressed
-            && observation.hold.is_none()
-            && self.history[index].observation.hold.is_some()
-        {
+        // TETR.IO's undo restores HOLD with the rest of the state, and HOLD
+        // never empties in play, so an empty HOLD where the target had one
+        // is a restart, not an undo, with or without Ctrl+Z.
+        if observation.hold.is_none() && self.history[index].observation.hold.is_some() {
             return None;
         }
         Some((index, position))
@@ -617,7 +589,8 @@ impl SessionTracker {
 }
 
 /// A restarted game (`R` in ZEN) is told from a PC by HOLD, not by the board:
-/// once filled, HOLD never empties within a game, while a restart empties it.
+/// once filled, HOLD never empties in play (undo restores the HOLD of the
+/// state it returns to), while a restart empties it.
 /// Before the first hold, a NEXT queue that does not continue the previous
 /// one is a restart too, with or without a HOLD now: the first state of a
 /// restart can show one already, when HOLD was pressed before it became
@@ -1324,49 +1297,43 @@ mod tests {
     }
 
     #[test]
-    fn undo_key_matches_a_state_by_board_and_queue_whatever_its_hold() {
-        let undone = || {
-            let mut undone = at(1, true);
-            undone.hold = None;
-            undone
-        };
+    fn undo_key_finds_a_state_whose_next_seems_to_continue() {
+        // QUEUE repeats T S Z: NEXT at 6 (T S Z I O) opens with the last
+        // three pieces of NEXT at 15 (. . T S Z), so the undo looks like
+        // play forward.
         let played = || {
             let mut tracker = tracker();
-            tracker.commit(at(0, true), 1.0, 1);
-            tracker.commit(at(1, true), 1.0, 2);
-            tracker.commit(at(2, true), 1.0, 3);
+            for (step, index) in [0, 4, 8, 12, 15].into_iter().enumerate() {
+                tracker.commit(at(index, true), 1.0, step as u64 + 1);
+            }
             tracker
         };
-        // Without the key, an emptied HOLD reads as a restart.
         let mut tracker = played();
-        assert!(matches!(
-            tracker.commit(undone(), 1.0, 10),
-            CommitOutcome::NewGame { .. }
+        assert!(!matches!(
+            tracker.commit(at(6, true), 1.0, 10),
+            CommitOutcome::RolledBack { .. }
         ));
 
-        // With Ctrl+Z, it is the earlier state, with the HOLD now shown.
         let mut tracker = played();
         tracker.note_key(GameKey::Undo, 9);
-        match tracker.commit(undone(), 1.0, 10) {
-            CommitOutcome::RolledBack { steps, snapshot } => {
-                assert_eq!(steps, 1);
-                assert_eq!(snapshot.observation, undone());
-            }
-            other => panic!("expected a rollback, got {other:?}"),
-        }
-        assert_eq!(tracker.snapshots().len(), 2);
+        assert_rolled_back(tracker.commit(at(6, true), 1.0, 10), 3);
+        assert_eq!(tracker.observed_queue_history(), &QUEUE[..12]);
     }
 
     #[test]
-    fn undo_key_finds_an_unseen_state_even_with_an_emptied_hold() {
+    fn undo_key_still_reads_an_emptied_hold_as_a_restart() {
+        // TETR.IO's undo restores HOLD, so a state matching an earlier one
+        // but HOLD is not that state.
         let mut tracker = tracker();
         tracker.commit(at(0, true), 1.0, 1);
         tracker.commit(at(3, true), 1.0, 2);
-        let mut undone = at(1, true);
-        undone.hold = None;
+        let mut restarted = at(1, true);
+        restarted.hold = None;
         tracker.note_key(GameKey::Undo, 3);
-        assert_rolled_back(tracker.commit(undone, 1.0, 4), 1);
-        assert_eq!(tracker.observed_queue_history(), &QUEUE[..7]);
+        assert!(matches!(
+            tracker.commit(restarted, 1.0, 4),
+            CommitOutcome::NewGame { .. }
+        ));
     }
 
     #[test]
