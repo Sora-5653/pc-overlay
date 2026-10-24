@@ -3,7 +3,10 @@
 //! (740, 240); the test pastes it back into a black frame of the original
 //! size. The calibration is the user's original drag selection, which
 //! included the border lines (194 px wide instead of the 192 px interior), so
-//! these tests also cover snapping to the visible border.
+//! these tests also cover snapping to the visible border. `zen_pieces_150.bmp`
+//! is the same crop of a screenshot whose window had a 23 px title bar, with
+//! the overlay's guidance drawn over an empty board. `zen_pieces_18/25/38.bmp`
+//! are the same crop of 1920x1080 ZEN recordings, taken at (740, 271).
 
 use std::path::Path;
 
@@ -218,6 +221,10 @@ fn reads_the_pieces_counter_left_of_the_board() {
         ("zen_000007.bmp", 16),
         ("zen_000008.bmp", 20),
         ("zen_000010.bmp", 9),
+        ("zen_pieces_150.bmp", 150),
+        ("zen_pieces_18.bmp", 18),
+        ("zen_pieces_25.bmp", 25),
+        ("zen_pieces_38.bmp", 38),
     ] {
         let result = recognizer.recognize(&load_fixture(name)).unwrap();
         assert_eq!(result.pieces_placed, Some(pieces), "{name}");
@@ -236,6 +243,34 @@ fn pieces_counter_needs_its_label() {
     }
     let result = recognizer().recognize(&frame).unwrap();
     assert_eq!(result.pieces_placed, None);
+}
+
+#[test]
+fn pieces_counter_reads_a_five_it_was_not_fitted_on() {
+    // The 5 template was fitted on the counter's 150. Paste the ATTACK value
+    // ("105, 16.76/M", right-aligned at the same x) over the counter line, so
+    // a 5 drawn elsewhere on the screen is read too.
+    let mut frame = load_fixture("zen_pieces_150.bmp");
+    let row = |y: u32| (((CROP_TOP + y) * FRAME_WIDTH + CROP_LEFT) * 4) as usize;
+    for y in 0..22 {
+        let (source, target) = (row(436 + y), row(391 + y));
+        frame.rgba.copy_within(source..source + 120 * 4, target);
+    }
+    let result = recognizer().recognize(&frame).unwrap();
+    assert_eq!(result.pieces_placed, Some(105));
+}
+
+#[test]
+fn empty_board_under_the_guidance_is_read_as_empty() {
+    // The guidance cells drawn by the overlay at PIECES 150 are not pieces.
+    let result = recognizer()
+        .recognize(&load_fixture("zen_pieces_150.bmp"))
+        .unwrap();
+    let observation = result.observation.expect("complete observation");
+    assert!(pc_overlay_core::board_is_empty(&observation.board));
+    assert_eq!(observation.current, Piece::I);
+    assert_eq!(observation.hold, Some(Piece::S));
+    assert_eq!(observation.next5, queue("LZLZS"));
 }
 
 /// Bilinear resize, standing in for TETR.IO drawing the board and its
@@ -274,7 +309,14 @@ fn rescale(frame: &CapturedFrame, scale: f32) -> CapturedFrame {
 #[test]
 fn pieces_counter_follows_the_display_scale() {
     let recognizer = recognizer();
-    for (name, pieces) in [("zen_000007.bmp", 16), ("zen_000008.bmp", 20)] {
+    for (name, pieces) in [
+        ("zen_000007.bmp", 16),
+        ("zen_000008.bmp", 20),
+        ("zen_pieces_150.bmp", 150),
+        ("zen_pieces_18.bmp", 18),
+        ("zen_pieces_25.bmp", 25),
+        ("zen_pieces_38.bmp", 38),
+    ] {
         let frame = load_fixture(name);
         for scale in [0.75, 0.9, 1.25, 1.5, 2.0] {
             let result = recognizer.recognize(&rescale(&frame, scale)).unwrap();
