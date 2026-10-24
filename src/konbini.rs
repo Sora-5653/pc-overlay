@@ -9,7 +9,7 @@
 //! Once a setup is built, `find_perfect_clears` searches the solves.
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeSet, HashMap},
     fs,
     path::{Path, PathBuf},
     process::Command,
@@ -277,6 +277,102 @@ pub fn find_perfect_clears(
         .into_iter()
         .filter_map(|steps| FoundSolve::new(&observation.board, height, steps))
         .collect()
+}
+
+/// The share of the queues the 7-bag still allows after NEXT for which the
+/// setup, built from this state, leaves a perfect clear: the sheet's `SOL`
+/// for the state on screen. `SOL` counts the orders of the pieces the sheet
+/// assumes (its ID names them on some sheets, such as the 2nd PC's case);
+/// built from other pieces, another piece stays in HOLD and the rate can be
+/// far lower. `first_index` is the absolute queue index of Current (pieces
+/// dealt before it). `None` when the queue does not follow the 7-bag there.
+pub fn state_pc_rate(
+    finder: &mut Finder,
+    setup: &KonbiniSetup,
+    progress: &KonbiniProgress,
+    observation: &Observation,
+    first_index: usize,
+) -> Option<f32> {
+    let built = setup.target.field(setup.target.cells);
+    let filled = built.count_ones() as usize;
+    // The loop's PC is 4 lines, less the rows the setup clears.
+    let cleared = (setup.target.cells.count_ones() as usize - filled) / 10;
+    let pc_pieces = (4usize.checked_sub(cleared)? * 10).checked_sub(filled)? / 4;
+    let remaining = setup.target.piece_count() - progress.placed_pieces();
+    // One piece may stay in HOLD; without HOLD yet, the queue gives it.
+    let length = remaining + pc_pieces + usize::from(observation.hold.is_none());
+    let mut completions = Vec::new();
+    let consistent = for_each_bag_completion(
+        &mut visible_queue(observation),
+        first_index,
+        length,
+        &mut |queue| completions.push(queue.to_vec()),
+    );
+    if !consistent || completions.is_empty() {
+        return None;
+    }
+    // Evenly spaced orders when there are many (the 1st PC has hundreds).
+    let step = completions.len().div_ceil(RATE_SAMPLES);
+    let mut outcomes: HashMap<(Option<Piece>, Vec<Piece>), bool> = HashMap::new();
+    let (mut total, mut cleared) = (0usize, 0usize);
+    for queue in completions.iter().step_by(step) {
+        total += 1;
+        let ends = finder.build_end_states(&setup.target, progress.placed, observation.hold, queue);
+        let found = ends.into_iter().any(|(hold, next)| {
+            let rest = queue[next.min(queue.len())..].to_vec();
+            *outcomes
+                .entry((hold, rest))
+                .or_insert_with_key(|(hold, rest)| {
+                    let supply = Supply::Queue {
+                        hold: *hold,
+                        queue: rest,
+                    };
+                    finder.perfect_clears(built, supply, 1).is_some()
+                })
+        });
+        cleared += usize::from(found);
+    }
+    Some(100.0 * cleared as f32 / total as f32)
+}
+
+/// Orders of the undisclosed pieces `state_pc_rate` checks at most.
+pub const RATE_SAMPLES: usize = 120;
+
+/// Calls `visit` with `queue` extended to `length` pieces in every order the
+/// 7-bag allows, `queue[0]` being the piece at absolute index `first_index`.
+/// False when the known pieces repeat within a bag (the position is off).
+fn for_each_bag_completion(
+    queue: &mut Vec<Piece>,
+    first_index: usize,
+    length: usize,
+    visit: &mut dyn FnMut(&[Piece]),
+) -> bool {
+    if queue.len() >= length {
+        visit(&queue[..length]);
+        return true;
+    }
+    let index = first_index + queue.len();
+    // The bag of a piece after NEXT starts within the queue: NEXT and
+    // Current cover the six pieces before it.
+    let bag_start = (index - index % 7).max(first_index) - first_index;
+    let seen = &queue[bag_start..];
+    if (0..seen.len()).any(|at| seen[..at].contains(&seen[at])) {
+        return false;
+    }
+    let open: Vec<Piece> = finder::ALL_PIECES
+        .iter()
+        .copied()
+        .filter(|piece| !seen.contains(piece))
+        .collect();
+    for piece in open {
+        queue.push(piece);
+        let consistent = for_each_bag_completion(queue, first_index, length, visit);
+        queue.pop();
+        if !consistent {
+            return false;
+        }
+    }
+    true
 }
 
 /// 2-line perfect clears (5 pieces) from the live board with its HOLD,

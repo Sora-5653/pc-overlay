@@ -553,6 +553,73 @@ impl Finder {
         }
     }
 
+    /// Every state `target` can be finished in from `placed` with `hold` and
+    /// `queue` (Current first): HOLD then, and the queue index of the next
+    /// Current. Which piece stays in HOLD depends on the order played.
+    pub fn build_end_states(
+        &mut self,
+        target: &Target,
+        placed: Mask,
+        hold: Option<Piece>,
+        queue: &[Piece],
+    ) -> Vec<(Option<Piece>, usize)> {
+        let mut ends = Vec::new();
+        let mut seen = HashSet::new();
+        self.collect_ends(target, placed, hold, queue, 0, &mut seen, &mut ends);
+        ends
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn collect_ends(
+        &mut self,
+        target: &Target,
+        placed: Mask,
+        hold: Option<Piece>,
+        queue: &[Piece],
+        next: usize,
+        seen: &mut HashSet<(Mask, Option<Piece>, usize)>,
+        ends: &mut Vec<(Option<Piece>, usize)>,
+    ) {
+        if !seen.insert((placed, hold, next)) {
+            return;
+        }
+        if placed == target.cells {
+            ends.push((hold, next));
+            return;
+        }
+        if !target.has_pieces_for(placed, hold, &queue[next.min(queue.len())..])
+            || (!target.clears_rows() && !separable(target.cells & !placed))
+        {
+            return;
+        }
+        let Some(&current) = queue.get(next) else {
+            return;
+        };
+        let mut options = vec![(current, hold, next + 1)];
+        match hold {
+            Some(held) if held != current => options.push((held, Some(current), next + 1)),
+            Some(_) => {}
+            None => {
+                if let Some(&after) = queue.get(next + 1) {
+                    options.push((after, Some(current), next + 2));
+                }
+            }
+        }
+        let field = target.field(placed);
+        for (piece, hold, next) in options {
+            let allowed = target.allowed(piece) & !placed;
+            for &cells in self.moves(field, piece).iter() {
+                let Some(drawing) = target.to_drawing(placed, cells) else {
+                    continue;
+                };
+                if drawing & !allowed != 0 {
+                    continue;
+                }
+                self.collect_ends(target, placed | drawing, hold, queue, next, seen, ends);
+            }
+        }
+    }
+
     /// Depth-first search over the piece order with one HOLD slot.
     fn search(
         &mut self,
