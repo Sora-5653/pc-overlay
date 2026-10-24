@@ -10,7 +10,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 
-use pc_overlay_core::rules::{ReviewStatus, RuleSet};
+use pc_overlay_core::rules::{ReviewStatus, RuleSet, SetupRule};
 use pc_overlay_core::{EvalContext, EvalResult, Piece};
 
 const PIECES: [Piece; 7] = [
@@ -104,7 +104,7 @@ fn solvable_matches_the_python_oracle_on_every_bag() {
     .unwrap();
     let cases = load_cases();
     let bags = all_bags();
-    let mut mismatches = Vec::new();
+    let mut rows_to_check = Vec::new();
     for (case_id, setups) in &expected {
         let rules = &cases[case_id];
         for (setup_id, rows) in setups {
@@ -114,27 +114,45 @@ fn solvable_matches_the_python_oracle_on_every_bag() {
                 .flat_map(|method| &method.setups)
                 .find(|setup| &setup.id == setup_id)
                 .unwrap_or_else(|| panic!("{setup_id} missing"));
-            for (hold, queue, count) in rows {
-                let hold = pieces(hold).first().copied();
-                let queue = pieces(queue);
-                let got = bags
-                    .iter()
-                    .filter(|bag| {
-                        let mut context = closed(bag);
-                        if !queue.is_empty() || hold.is_some() {
-                            context = context.with_case(hold, &queue);
-                        }
-                        setup.build_condition.evaluate(&context) == EvalResult::Satisfied
-                    })
-                    .count();
-                if got != *count {
-                    mismatches.push(format!(
-                        "{case_id}/{setup_id} hold={hold:?} queue={queue:?}: rust {got}, python {count}"
-                    ));
-                }
+            for row in rows {
+                rows_to_check.push((case_id, setup, row));
             }
         }
     }
+    let check = &|(case_id, setup, (hold, queue, count)): &(&String, &SetupRule, &Row)| {
+        let hold = pieces(hold).first().copied();
+        let queue = pieces(queue);
+        let got = bags
+            .iter()
+            .filter(|bag| {
+                let mut context = closed(bag);
+                if !queue.is_empty() || hold.is_some() {
+                    context = context.with_case(hold, &queue);
+                }
+                setup.build_condition.evaluate(&context) == EvalResult::Satisfied
+            })
+            .count();
+        (got != *count).then(|| {
+            format!(
+                "{case_id}/{} hold={hold:?} queue={queue:?}: rust {got}, python {count}",
+                setup.id
+            )
+        })
+    };
+    // About 8 million evaluations; the rows are independent, so split them
+    // across the cores.
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
+    let chunk = rows_to_check.len().div_ceil(threads).max(1);
+    let mismatches: Vec<String> = std::thread::scope(|scope| {
+        let workers: Vec<_> = rows_to_check
+            .chunks(chunk)
+            .map(|rows| scope.spawn(move || rows.iter().filter_map(check).collect::<Vec<_>>()))
+            .collect();
+        workers
+            .into_iter()
+            .flat_map(|worker| worker.join().unwrap())
+            .collect()
+    });
     assert!(mismatches.is_empty(), "{mismatches:#?}");
 }
 

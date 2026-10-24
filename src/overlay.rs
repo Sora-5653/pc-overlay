@@ -38,6 +38,8 @@ pub struct OverlayBoard {
 pub struct OverlayState {
     pub status: String,
     pub detail: String,
+    /// Drawn large just above the board, such as the setup's PC rate.
+    pub badge: String,
     pub board: Option<OverlayBoard>,
     pub cells: Vec<OverlayCell>,
 }
@@ -252,9 +254,10 @@ mod win32 {
         Foundation::{ERROR_CLASS_ALREADY_EXISTS, GetLastError, HWND, LPARAM, POINT, SIZE, WPARAM},
         Graphics::Gdi::{
             AC_SRC_ALPHA, AC_SRC_OVER, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLACK_BRUSH,
-            BLENDFUNCTION, BeginPaint, CreateCompatibleDC, CreateDIBSection, DEFAULT_GUI_FONT,
-            DIB_RGB_COLORS, DeleteDC, DeleteObject, EndPaint, GdiFlush, GetDC, GetStockObject, HDC,
-            PAINTSTRUCT, ReleaseDC, SelectObject, SetBkMode, SetTextColor, TRANSPARENT, TextOutW,
+            BLENDFUNCTION, BeginPaint, CreateCompatibleDC, CreateDIBSection, CreateFontW,
+            DEFAULT_CHARSET, DEFAULT_GUI_FONT, DIB_RGB_COLORS, DeleteDC, DeleteObject, EndPaint,
+            FW_BOLD, GdiFlush, GetDC, GetStockObject, HDC, NONANTIALIASED_QUALITY, PAINTSTRUCT,
+            ReleaseDC, SelectObject, SetBkMode, SetTextColor, TRANSPARENT, TextOutW,
         },
         System::LibraryLoader::GetModuleHandleW,
         UI::WindowsAndMessaging::{
@@ -522,6 +525,53 @@ mod win32 {
             SetTextColor(hdc, colorref(Rgb(190, 190, 190)));
             draw_text(hdc, 12, 28, &state.detail);
             SelectObject(hdc, old_font);
+            if let Some(board) = state.board {
+                draw_badge(hdc, board, &state.badge);
+            }
+        }
+    }
+
+    /// The badge in a bold font about one cell high, at the board's top
+    /// left, just above it. Unsmoothed, as every drawn pixel turns opaque.
+    unsafe fn draw_badge(hdc: HDC, board: OverlayBoard, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        let rect = board.rect;
+        let size = (rect.height as i32 / 20).clamp(16, 40);
+        // Below the status and detail lines.
+        let y = (rect.top as i32 - size - 4).max(46);
+        let x = rect.left as i32;
+        unsafe {
+            let face: Vec<u16> = "Segoe UI ".encode_utf16().collect();
+            let font = CreateFontW(
+                -size,
+                0,
+                0,
+                0,
+                FW_BOLD as i32,
+                0,
+                0,
+                0,
+                u32::from(DEFAULT_CHARSET),
+                0,
+                0,
+                u32::from(NONANTIALIASED_QUALITY),
+                0,
+                face.as_ptr(),
+            );
+            if font.is_null() {
+                return;
+            }
+            let old_font = SelectObject(hdc, font);
+            SetBkMode(hdc, TRANSPARENT as i32);
+            // A dark shadow keeps it readable on a light background.
+            SetTextColor(hdc, colorref(Rgb(16, 16, 16)));
+            draw_text(hdc, x + 2, y + 2, text);
+            SetTextColor(hdc, colorref(Rgb(255, 220, 90)));
+            draw_text(hdc, x, y, text);
+            SelectObject(hdc, old_font);
+            DeleteObject(font);
         }
     }
 

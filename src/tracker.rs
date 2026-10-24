@@ -58,6 +58,10 @@ pub struct Snapshot {
     pub pc_ordinal: PcOrdinal,
     pub observation: Observation,
     pub observed_queue_history: Vec<Piece>,
+    /// How many pieces of the game's queue were disclosed at this state: its
+    /// NEXT5 ends at this position. Undo is located by this position.
+    #[serde(default)]
+    pub queue_end: usize,
     pub guidance: GuidanceState,
     pub recognition_confidence: f32,
 }
@@ -87,6 +91,9 @@ pub struct SessionTracker {
     config: TrackerConfig,
     pc_ordinal: PcOrdinal,
     observed_queue_history: Vec<Piece>,
+    /// Every piece disclosed since the game start or resync. Unlike
+    /// `observed_queue_history` it is not reseeded at a PC.
+    game_queue: Vec<Piece>,
     guidance: GuidanceState,
     history: Vec<Snapshot>,
 }
@@ -97,6 +104,7 @@ impl SessionTracker {
             config,
             pc_ordinal: PcOrdinal::default(),
             observed_queue_history: Vec::new(),
+            game_queue: Vec::new(),
             guidance: GuidanceState::default(),
             history: Vec::new(),
         }
@@ -187,8 +195,35 @@ impl SessionTracker {
     pub fn resync(&mut self, ordinal: PcOrdinal) {
         self.pc_ordinal = ordinal;
         self.observed_queue_history.clear();
+        self.game_queue.clear();
         self.guidance = GuidanceState::default();
         self.history.clear();
+    }
+
+    /// Adopts the PC number derived from the game's own PIECES counter, as a
+    /// second source next to the empty-board boundaries counted by `commit`.
+    /// Unlike `resync` it keeps the history: the snapshots of the current PC
+    /// are relabeled, so Undo and the PC start stay usable. Returns whether
+    /// the number changed.
+    pub fn align_pc_ordinal(&mut self, ordinal: PcOrdinal) -> bool {
+        if ordinal == self.pc_ordinal {
+            return false;
+        }
+        let start = self
+            .history
+            .iter()
+            .rposition(|snapshot| snapshot.pc_ordinal != self.pc_ordinal)
+            .map_or(0, |index| index + 1);
+        self.pc_ordinal = ordinal;
+        // Guidance chosen for the wrong PC does not carry over.
+        self.guidance = GuidanceState::default();
+        for snapshot in &mut self.history[start..] {
+            snapshot.pc_ordinal = ordinal;
+        }
+        if let Some(last) = self.history.last_mut() {
+            last.guidance = GuidanceState::default();
+        }
+        true
     }
 
     pub fn commit(
@@ -224,11 +259,22 @@ impl SessionTracker {
             target.guidance.advance_solve_after_undo();
             self.pc_ordinal = target.pc_ordinal;
             self.observed_queue_history = target.observed_queue_history.clone();
+            self.game_queue.truncate(target.queue_end);
             self.guidance = target.guidance.clone();
             return CommitOutcome::RolledBack {
                 steps,
                 snapshot: target.clone(),
             };
+        }
+
+        if let Some((index, position)) = self.undo_target(&observation) {
+            return self.roll_back_to_unseen(
+                index,
+                position,
+                observation,
+                recognition_confidence,
+                timestamp_ms,
+            );
         }
 
         if self
@@ -239,6 +285,7 @@ impl SessionTracker {
             // Undo never crosses a restart, so the old game's states are gone.
             self.pc_ordinal = PcOrdinal::default();
             self.observed_queue_history = seed_queue(&observation);
+            self.game_queue = seed_queue(&observation);
             self.guidance = GuidanceState::default();
             self.history.clear();
             let snapshot = self.push_snapshot(observation, recognition_confidence, timestamp_ms);
@@ -250,6 +297,22 @@ impl SessionTracker {
         });
 
         if crossed_pc_boundary {
+            let last = self
+                .history
+                .last()
+                .expect("a PC boundary has a previous state");
+            // A PC is counted even when the queue does not continue; the game
+            // queue then starts a fresh segment, so a later Undo stops there.
+            self.game_queue = append_revealed(
+                &self.game_queue,
+                &last.observation.next5,
+                &observation.next5,
+            )
+            .unwrap_or_else(|| {
+                let mut queue = std::mem::take(&mut self.game_queue);
+                queue.extend(seed_queue(&observation));
+                queue
+            });
             self.pc_ordinal = self.pc_ordinal.advance();
             self.observed_queue_history = seed_queue(&observation);
             self.guidance = GuidanceState::default();
@@ -261,13 +324,74 @@ impl SessionTracker {
             ) else {
                 return CommitOutcome::RejectedHistoryDiscontinuity;
             };
+            self.game_queue
+                .extend_from_slice(&updated[self.observed_queue_history.len()..]);
             self.observed_queue_history = updated;
         } else {
             self.observed_queue_history = seed_queue(&observation);
+            self.game_queue = seed_queue(&observation);
         }
 
         let snapshot = self.push_snapshot(observation, recognition_confidence, timestamp_ms);
         CommitOutcome::Accepted { snapshot }
+    }
+
+    /// Undo to a state that never became stable, such as one the player left
+    /// within the frames the stability filter needs. Its NEXT5 is an earlier
+    /// window of the game queue, and the newest snapshot at or before that
+    /// window is where the undone placements began. Returns that snapshot's
+    /// index and the queue position the observation's NEXT5 ends at.
+    fn undo_target(&self, observation: &Observation) -> Option<(usize, usize)> {
+        let last = self.history.last()?;
+        // One or two placements forward keep three or more NEXT pieces in
+        // view. An undo matches all five pieces of an earlier window instead,
+        // and a short forward overlap next to such a match is a coincidence.
+        if overlap(&last.observation.next5, &observation.next5).is_some_and(|size| size >= 3) {
+            return None;
+        }
+        let earliest = self.history.first()?.queue_end;
+        let position = (earliest.max(5)..last.queue_end)
+            .rev()
+            .find(|end| self.game_queue.get(end - 5..*end) == Some(&observation.next5[..]))?;
+        let index = self
+            .history
+            .iter()
+            .rposition(|snapshot| snapshot.queue_end <= position)?;
+        // HOLD never empties within a game, so an empty HOLD where the
+        // target had one is a restart, not an undo.
+        if observation.hold.is_none() && self.history[index].observation.hold.is_some() {
+            return None;
+        }
+        Some((index, position))
+    }
+
+    fn roll_back_to_unseen(
+        &mut self,
+        index: usize,
+        position: usize,
+        observation: Observation,
+        recognition_confidence: f32,
+        timestamp_ms: u64,
+    ) -> CommitOutcome {
+        let steps = self.history.len() - 1 - index;
+        self.history.truncate(index + 1);
+        let target = self.history.last().expect("undo target exists");
+        self.pc_ordinal = target.pc_ordinal;
+        self.observed_queue_history = target.observed_queue_history.clone();
+        self.guidance = target.guidance.clone();
+        // Undo can stop just after a PC whose empty board never became
+        // stable: the target is still in the previous PC.
+        if !board_is_empty(&target.observation.board) && board_is_empty(&observation.board) {
+            self.pc_ordinal = self.pc_ordinal.advance();
+            self.observed_queue_history = seed_queue(&observation);
+            self.guidance = GuidanceState::default();
+        } else {
+            self.observed_queue_history
+                .extend_from_slice(&self.game_queue[target.queue_end..position]);
+        }
+        self.game_queue.truncate(position);
+        let snapshot = self.push_snapshot(observation, recognition_confidence, timestamp_ms);
+        CommitOutcome::RolledBack { steps, snapshot }
     }
 
     fn push_snapshot(
@@ -281,6 +405,7 @@ impl SessionTracker {
             pc_ordinal: self.pc_ordinal,
             observation,
             observed_queue_history: self.observed_queue_history.clone(),
+            queue_end: self.game_queue.len(),
             guidance: self.guidance.clone(),
             recognition_confidence,
         };
@@ -307,15 +432,19 @@ fn seed_queue(observation: &Observation) -> Vec<Piece> {
         .collect()
 }
 
+/// How many pieces at the end of the previous NEXT5 open the current one.
+fn overlap(previous: &[Piece; 5], current: &[Piece; 5]) -> Option<usize> {
+    (1..=5)
+        .rev()
+        .find(|size| previous[5 - size..] == current[..*size])
+}
+
 fn append_revealed(
     history: &[Piece],
     previous: &[Piece; 5],
     current: &[Piece; 5],
 ) -> Option<Vec<Piece>> {
-    let overlap = (1..=5)
-        .rev()
-        .find(|size| previous[5 - size..] == current[..*size]);
-    let overlap = overlap?;
+    let overlap = overlap(previous, current)?;
     let mut updated = history.to_vec();
     updated.extend_from_slice(&current[overlap..]);
     Some(updated)
@@ -567,6 +696,41 @@ mod tests {
     }
 
     #[test]
+    fn aligning_the_ordinal_relabels_the_current_pc_and_keeps_undo() {
+        let mut tracker = tracker();
+        let first = observation(
+            true,
+            Piece::I,
+            [Piece::J, Piece::L, Piece::O, Piece::S, Piece::T],
+        );
+        let second = observation(
+            true,
+            Piece::J,
+            [Piece::L, Piece::O, Piece::S, Piece::T, Piece::Z],
+        );
+        tracker.commit(first.clone(), 1.0, 1);
+        tracker.commit(second, 1.0, 2);
+
+        assert!(!tracker.align_pc_ordinal(PcOrdinal::default()));
+        assert!(tracker.align_pc_ordinal(PcOrdinal::new(3).unwrap()));
+        assert_eq!(tracker.pc_ordinal().get(), 3);
+        assert!(
+            tracker
+                .snapshots()
+                .iter()
+                .all(|snapshot| snapshot.pc_ordinal.get() == 3)
+        );
+        assert_eq!(tracker.current_pc_start().unwrap().timestamp_ms, 1);
+
+        // Undo still finds the earlier state, now labeled with the new PC.
+        assert!(matches!(
+            tracker.commit(first, 1.0, 3),
+            CommitOutcome::RolledBack { steps: 1, .. }
+        ));
+        assert_eq!(tracker.pc_ordinal().get(), 3);
+    }
+
+    #[test]
     fn emptied_hold_restarts_at_pc_one_instead_of_counting_a_pc() {
         let mut tracker = tracker();
         tracker.resync(PcOrdinal::new(3).unwrap());
@@ -652,6 +816,165 @@ mod tests {
             tracker.commit(start, 1.0, 3),
             CommitOutcome::RolledBack { steps: 1, .. }
         ));
+    }
+
+    /// Three 7-bags, so NEXT5 windows tell queue positions apart.
+    const QUEUE: [Piece; 21] = [
+        Piece::I,
+        Piece::J,
+        Piece::L,
+        Piece::O,
+        Piece::S,
+        Piece::T,
+        Piece::Z,
+        Piece::T,
+        Piece::S,
+        Piece::Z,
+        Piece::I,
+        Piece::O,
+        Piece::L,
+        Piece::J,
+        Piece::L,
+        Piece::J,
+        Piece::O,
+        Piece::I,
+        Piece::T,
+        Piece::S,
+        Piece::Z,
+    ];
+
+    /// The state with `QUEUE[index]` as Current.
+    fn at(index: usize, filled: bool) -> Observation {
+        let mut next5 = [Piece::I; 5];
+        next5.copy_from_slice(&QUEUE[index + 1..index + 6]);
+        observation(filled, QUEUE[index], next5)
+    }
+
+    fn assert_rolled_back(outcome: CommitOutcome, expected_steps: usize) {
+        match outcome {
+            CommitOutcome::RolledBack { steps, .. } => assert_eq!(steps, expected_steps),
+            other => panic!("expected a rollback, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn undo_before_a_pc_to_an_unstable_state_restores_the_previous_pc() {
+        let mut tracker = tracker();
+        tracker.commit(at(0, true), 1.0, 1);
+        // The last PC piece was placed from a state that never became stable.
+        tracker.commit(at(2, false), 1.0, 2);
+        assert_eq!(tracker.pc_ordinal().get(), 2);
+
+        assert_rolled_back(tracker.commit(at(1, true), 1.0, 3), 1);
+        assert_eq!(tracker.pc_ordinal().get(), 1);
+        assert_eq!(tracker.observed_queue_history(), &QUEUE[..7]);
+        let start = tracker.current_pc_start().expect("PC 1 start");
+        assert_eq!(start.observation, at(0, true));
+
+        // Previously the undo was rejected, and the same queue position with
+        // a filled board was then accepted as PC 2, so the next PC read 3.
+        let mut misplaced = at(2, true);
+        misplaced.board[0][1] = Some(Piece::L);
+        assert!(matches!(
+            tracker.commit(misplaced, 1.0, 4),
+            CommitOutcome::Accepted { .. }
+        ));
+        assert_eq!(tracker.pc_ordinal().get(), 1);
+        tracker.commit(at(3, false), 1.0, 5);
+        assert_eq!(tracker.pc_ordinal().get(), 2);
+        let start = tracker.current_pc_start().expect("PC 2 start");
+        assert_eq!(start.observation, at(3, false));
+    }
+
+    #[test]
+    fn undo_to_an_unstable_pc_start_does_not_count_the_pc_again() {
+        let mut tracker = tracker();
+        tracker.commit(at(0, true), 1.0, 1);
+        // PC 2 starts with HOLD I and Current J; only the state after holding
+        // J (HOLD J, Current I) became stable.
+        let pc_start = at(1, false);
+        let mut held = pc_start.clone();
+        held.hold = Some(QUEUE[1]);
+        held.current = Piece::I;
+        tracker.commit(held, 1.0, 2);
+        assert_eq!(tracker.pc_ordinal().get(), 2);
+        tracker.commit(at(2, true), 1.0, 3);
+        tracker.commit(at(3, true), 1.0, 4);
+
+        // Previously this empty board after a filled one counted PC 3.
+        assert_rolled_back(tracker.commit(pc_start.clone(), 1.0, 5), 2);
+        assert_eq!(tracker.pc_ordinal().get(), 2);
+        // Seeded at the stable PC start, whose Current was the held-out I.
+        assert_eq!(tracker.observed_queue_history()[0], Piece::I);
+        assert_eq!(tracker.observed_queue_history()[1..], QUEUE[2..7]);
+        let start = tracker.current_pc_start().expect("PC 2 start");
+        assert_eq!(start.observation.board, pc_start.board);
+        assert_eq!(start.observation.hold, Some(QUEUE[1]));
+    }
+
+    #[test]
+    fn undo_within_a_pc_to_an_unstable_state_keeps_the_queue() {
+        let mut tracker = tracker();
+        tracker.commit(at(0, true), 1.0, 1);
+        tracker.commit(at(2, true), 1.0, 2);
+        tracker.commit(at(4, true), 1.0, 3);
+
+        // Undo past the stable state at 2 to the unstable one at 1.
+        assert_rolled_back(tracker.commit(at(1, true), 1.0, 4), 2);
+        assert_eq!(tracker.pc_ordinal().get(), 1);
+        assert_eq!(tracker.observed_queue_history(), &QUEUE[..7]);
+
+        // Play resumes forward without repeating disclosed pieces.
+        assert!(matches!(
+            tracker.commit(at(2, true), 1.0, 5),
+            CommitOutcome::Accepted { .. }
+        ));
+        assert!(matches!(
+            tracker.commit(at(3, false), 1.0, 6),
+            CommitOutcome::Accepted { .. }
+        ));
+        assert_eq!(tracker.pc_ordinal().get(), 2);
+        assert!(matches!(
+            tracker.commit(at(4, true), 1.0, 7),
+            CommitOutcome::Accepted { .. }
+        ));
+        assert_eq!(tracker.observed_queue_history(), &QUEUE[3..10]);
+
+        // An exact match still rolls back across the PC.
+        assert_rolled_back(tracker.commit(at(2, true), 1.0, 8), 2);
+        assert_eq!(tracker.pc_ordinal().get(), 1);
+        assert_eq!(tracker.observed_queue_history(), &QUEUE[..8]);
+    }
+
+    #[test]
+    fn undo_far_back_within_the_game_restores_the_earlier_pc() {
+        let mut tracker = tracker();
+        tracker.commit(at(0, true), 1.0, 1);
+        tracker.commit(at(3, false), 1.0, 2);
+        tracker.commit(at(5, true), 1.0, 3);
+        tracker.commit(at(8, false), 1.0, 4);
+        tracker.commit(at(10, true), 1.0, 5);
+        assert_eq!(tracker.pc_ordinal().get(), 3);
+
+        // Several undos at once, back into PC 1, as one stable frame.
+        assert_rolled_back(tracker.commit(at(2, true), 1.0, 6), 4);
+        assert_eq!(tracker.pc_ordinal().get(), 1);
+        assert_eq!(tracker.observed_queue_history(), &QUEUE[..8]);
+    }
+
+    #[test]
+    fn restart_with_an_earlier_queue_window_is_still_a_new_game() {
+        let mut tracker = tracker();
+        tracker.commit(at(0, true), 1.0, 1);
+        tracker.commit(at(3, false), 1.0, 2);
+        tracker.commit(at(5, true), 1.0, 3);
+        let mut restarted = at(1, false);
+        restarted.hold = None;
+        assert!(matches!(
+            tracker.commit(restarted, 1.0, 4),
+            CommitOutcome::NewGame { .. }
+        ));
+        assert_eq!(tracker.pc_ordinal().get(), 1);
     }
 
     #[test]

@@ -15,6 +15,7 @@ pub mod guidance;
 pub mod konbini;
 pub mod model;
 pub mod overlay;
+pub mod pieces_ocr;
 pub mod recognition;
 pub mod roi;
 pub mod rules;
