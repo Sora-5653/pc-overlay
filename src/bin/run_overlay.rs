@@ -5,11 +5,11 @@ use std::{
     path::{Path, PathBuf},
     sync::mpsc,
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use pc_overlay_core::{
-    BoardCalibration, CommitOutcome, DiagramSet, FrameSize, OverlayBoard, OverlayCell,
+    BoardCalibration, CommitOutcome, DiagramSet, FrameSize, GameKey, OverlayBoard, OverlayCell,
     OverlayCellKind, OverlayState, OverlayWindow, PcOrdinal, Piece, RecognizerConfig, RuleSet,
     SessionTracker, SolveProgress, SourceSections, StabilityConfig, StabilityFilter,
     TetrioRecognizer, TrackerConfig, WindowInfo, WindowLocator, board_is_empty,
@@ -32,6 +32,8 @@ struct Args {
     cases: PathBuf,
     calibration: PathBuf,
     konbini: PathBuf,
+    /// The virtual key of TETR.IO's retry key (`R` by default).
+    retry_key: u32,
 }
 
 impl Args {
@@ -43,6 +45,7 @@ impl Args {
             cases: PathBuf::from("data/cases"),
             calibration: PathBuf::from("data/overlay-calibration.json"),
             konbini: PathBuf::from("data/konbini"),
+            retry_key: 0x52,
             ..Self::default()
         }
     }
@@ -74,7 +77,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut stability = StabilityFilter::new(StabilityConfig::default());
     let mut tracker = SessionTracker::new(TrackerConfig::default());
     let mut pieces_reading = PiecesReading::default();
-    let hotkeys = keyboard_hook::start();
+    let hotkeys = keyboard_hook::start(args.retry_key);
     let mut solve_notice: Option<(&'static str, Instant)> = None;
     let mut konbini = KonbiniGuide::new(args.konbini.clone());
     konbini.load_or_fetch();
@@ -109,6 +112,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     solve_notice = Some((notice, Instant::now()));
                 }
                 Hotkey::Konbini(hotkey) => konbini.apply(hotkey),
+                Hotkey::Game(key) => tracker.note_key(key, unix_ms()),
                 Hotkey::Solve(hotkey) => {
                     if let Some(notice) = apply_solve_hotkey(&mut tracker, hotkey, solve_available)
                     {
@@ -301,14 +305,20 @@ enum Hotkey {
     Solve(SolveHotkey),
     /// Ctrl+Alt+K / N / B / F.
     Konbini(KonbiniHotkey),
+    /// TETR.IO's own retry (`retry_key`), undo (Ctrl+Z) and redo (Ctrl+Y),
+    /// passed to the tracker as hints. ZEN fixes Ctrl+Z and Ctrl+Y.
+    Game(GameKey),
 }
 
 /// The hotkey a key-down of virtual key `key` makes, given whether Ctrl and
-/// Alt are both held.
-fn hotkey_for(key: u32, ctrl_alt: bool) -> Option<Hotkey> {
-    match (key, ctrl_alt) {
+/// Alt are held and the virtual key of TETR.IO's retry.
+fn hotkey_for(key: u32, ctrl: bool, alt: bool, retry_key: u32) -> Option<Hotkey> {
+    match (key, ctrl && alt) {
         (0x53, true) => Some(Hotkey::Solve(SolveHotkey::Toggle)),
         (0x53, false) => Some(Hotkey::Solve(SolveHotkey::Show)),
+        (0x5A, false) if ctrl => Some(Hotkey::Game(GameKey::Undo)),
+        (0x59, false) if ctrl => Some(Hotkey::Game(GameKey::Redo)),
+        (_, false) if !ctrl && !alt && key == retry_key => Some(Hotkey::Game(GameKey::Retry)),
         (_, false) => None,
         (0x31..=0x37, true) => PcOrdinal::new((key - 0x30) as u8).map(Hotkey::Resync),
         (0x4B, true) => Some(Hotkey::Konbini(KonbiniHotkey::PreferKonbini)),
@@ -317,6 +327,29 @@ fn hotkey_for(key: u32, ctrl_alt: bool) -> Option<Hotkey> {
         (0x46, true) => Some(Hotkey::Konbini(KonbiniHotkey::Refetch)),
         _ => None,
     }
+}
+
+/// The virtual key `--retry-key` names: a letter or digit, or a code such as
+/// `0x52`.
+fn parse_virtual_key(text: &str) -> Option<u32> {
+    if let Some(hex) = text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
+        return u32::from_str_radix(hex, 16)
+            .ok()
+            .filter(|key| (1..=0xFE).contains(key));
+    }
+    let mut chars = text.chars();
+    match (chars.next(), chars.next()) {
+        (Some(c), None) if c.is_ascii_alphanumeric() => Some(u32::from(c.to_ascii_uppercase())),
+        _ => None,
+    }
+}
+
+/// Milliseconds since the Unix epoch, the clock of `CapturedFrame::captured_at_ms`.
+fn unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+        .unwrap_or_default()
 }
 
 /// Hotkeys from a low-level keyboard hook on a thread of its own. Polling
@@ -329,7 +362,7 @@ fn hotkey_for(key: u32, ctrl_alt: bool) -> Option<Hotkey> {
 mod keyboard_hook {
     use std::sync::{
         Mutex, OnceLock,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicU32, AtomicU64, Ordering},
         mpsc::{self, Receiver, Sender},
     };
 
@@ -358,13 +391,16 @@ mod keyboard_hook {
     static STATE: OnceLock<Mutex<HookState>> = OnceLock::new();
     /// The TETR.IO window's handle, or 0 while there is none.
     static TARGET: AtomicU64 = AtomicU64::new(0);
+    /// The virtual key of TETR.IO's retry.
+    static RETRY_KEY: AtomicU32 = AtomicU32::new(0x52);
 
     /// Sets the window that must have focus for a press to count.
     pub fn set_target(handle: Option<u64>) {
         TARGET.store(handle.unwrap_or(0), Ordering::Relaxed);
     }
 
-    pub fn start() -> Receiver<Hotkey> {
+    pub fn start(retry_key: u32) -> Receiver<Hotkey> {
+        RETRY_KEY.store(retry_key, Ordering::Relaxed);
         let (sender, receiver) = mpsc::channel();
         let state = HookState {
             sender,
@@ -414,11 +450,16 @@ mod keyboard_hook {
                 const VK_MENU: i32 = 0x12;
                 // SAFETY: GetAsyncKeyState takes a virtual key code only. In
                 // the hook it reflects every key but the one being pressed.
-                let ctrl_alt =
-                    unsafe { GetAsyncKeyState(VK_CONTROL) < 0 && GetAsyncKeyState(VK_MENU) < 0 };
+                let (ctrl, alt) = unsafe {
+                    (
+                        GetAsyncKeyState(VK_CONTROL) < 0,
+                        GetAsyncKeyState(VK_MENU) < 0,
+                    )
+                };
                 let target = TARGET.load(Ordering::Relaxed);
                 let focused = target != 0 && foreground_handle() == Some(target);
-                if focused && let Some(hotkey) = hotkey_for(key, ctrl_alt) {
+                let retry_key = RETRY_KEY.load(Ordering::Relaxed);
+                if focused && let Some(hotkey) = hotkey_for(key, ctrl, alt, retry_key) {
                     // The receiver lives as long as the overlay loop.
                     let _ = state.sender.send(hotkey);
                 }
@@ -433,7 +474,7 @@ mod keyboard_hook {
 mod keyboard_hook {
     use std::sync::mpsc::{self, Receiver};
 
-    pub fn start() -> Receiver<super::Hotkey> {
+    pub fn start(_retry_key: u32) -> Receiver<super::Hotkey> {
         mpsc::channel().1
     }
 
@@ -1830,9 +1871,15 @@ fn parse_args() -> Result<Args, Box<dyn Error>> {
             "--konbini" => {
                 args.konbini = PathBuf::from(values.next().ok_or("--konbini requires a folder")?);
             }
+            "--retry-key" => {
+                let value = values.next().ok_or("--retry-key requires a key")?;
+                args.retry_key = parse_virtual_key(&value).ok_or_else(|| {
+                    format!("--retry-key takes a letter, a digit or a code like 0x52, not {value}")
+                })?;
+            }
             "--help" | "-h" => {
                 println!(
-                    "run-overlay [--once] [--verbose] [--reviewed-only] [--interval-ms N] [--rules PATH] [--diagrams PATH] [--cases DIR] [--calibration PATH] [--konbini DIR]"
+                    "run-overlay [--once] [--verbose] [--reviewed-only] [--interval-ms N] [--rules PATH] [--diagrams PATH] [--cases DIR] [--calibration PATH] [--konbini DIR] [--retry-key KEY]"
                 );
                 std::process::exit(0);
             }
@@ -2245,25 +2292,44 @@ mod tests {
     #[test]
     fn key_downs_map_to_hotkeys_only_with_their_modifiers() {
         const VK_S: u32 = 0x53;
+        const VK_R: u32 = 0x52;
+        let plain = |key| hotkey_for(key, false, false, VK_R);
+        let ctrl_alt = |key| hotkey_for(key, true, true, VK_R);
+        let ctrl = |key| hotkey_for(key, true, false, VK_R);
+        assert_eq!(plain(VK_S), Some(Hotkey::Solve(SolveHotkey::Show)));
+        assert_eq!(ctrl_alt(VK_S), Some(Hotkey::Solve(SolveHotkey::Toggle)));
         assert_eq!(
-            hotkey_for(VK_S, false),
-            Some(Hotkey::Solve(SolveHotkey::Show))
-        );
-        assert_eq!(
-            hotkey_for(VK_S, true),
-            Some(Hotkey::Solve(SolveHotkey::Toggle))
-        );
-        assert_eq!(
-            hotkey_for(0x33, true),
+            ctrl_alt(0x33),
             Some(Hotkey::Resync(PcOrdinal::new(3).unwrap()))
         );
-        assert_eq!(hotkey_for(0x33, false), None, "plain 3 is a game key");
-        assert_eq!(hotkey_for(0x38, true), None, "there is no 8th PC");
+        assert_eq!(plain(0x33), None, "plain 3 is a game key");
+        assert_eq!(ctrl_alt(0x38), None, "there is no 8th PC");
+        assert_eq!(ctrl_alt(0x4E), Some(Hotkey::Konbini(KonbiniHotkey::Next)));
+        assert_eq!(plain(0x4E), None);
+
+        // TETR.IO's own keys, as hints for the tracker.
+        assert_eq!(plain(VK_R), Some(Hotkey::Game(GameKey::Retry)));
+        assert_eq!(ctrl(VK_R), None, "Ctrl+R is not a retry");
         assert_eq!(
-            hotkey_for(0x4E, true),
-            Some(Hotkey::Konbini(KonbiniHotkey::Next))
+            hotkey_for(0x54, false, false, 0x54),
+            Some(Hotkey::Game(GameKey::Retry)),
+            "the retry key is configurable"
         );
-        assert_eq!(hotkey_for(0x4E, false), None);
+        assert_eq!(ctrl(0x5A), Some(Hotkey::Game(GameKey::Undo)));
+        assert_eq!(ctrl(0x59), Some(Hotkey::Game(GameKey::Redo)));
+        assert_eq!(plain(0x5A), None, "plain Z rotates");
+        assert_eq!(ctrl_alt(0x5A), None);
+    }
+
+    #[test]
+    fn retry_keys_parse_as_virtual_keys() {
+        assert_eq!(parse_virtual_key("r"), Some(0x52));
+        assert_eq!(parse_virtual_key("R"), Some(0x52));
+        assert_eq!(parse_virtual_key("5"), Some(0x35));
+        assert_eq!(parse_virtual_key("0x70"), Some(0x70));
+        assert_eq!(parse_virtual_key("RR"), None);
+        assert_eq!(parse_virtual_key("0x100"), None);
+        assert_eq!(parse_virtual_key(""), None);
     }
 
     #[test]
