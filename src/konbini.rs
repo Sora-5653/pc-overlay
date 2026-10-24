@@ -335,6 +335,142 @@ pub fn state_pc_rate(
     Some(100.0 * cleared as f32 / total as f32)
 }
 
+/// A first placement for a board the shown pieces cannot perfect clear
+/// yet: the piece (Current, or the one HOLD gives) and the board cells it
+/// covers, and for how many of the orders the 7-bag allows after NEXT a
+/// perfect clear is still there after it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StagedMove {
+    pub piece: Piece,
+    pub cells: Vec<Cell>,
+    pub cleared: usize,
+    pub total: usize,
+}
+
+/// The placements of the next piece, best first, after which a perfect
+/// clear stays for the most orders of the pieces not shown yet (as for
+/// `state_pc_rate`, at most `RATE_SAMPLES` of them). Played a piece at a
+/// time, as in a perfect-clear loop: the next piece shows in NEXT after
+/// each placement and the search runs again. Only placements that keep a
+/// perfect clear for some order; empty when the board is above the rows the
+/// finder tracks, the perfect clear needs more than `STAGED_UNSEEN` pieces
+/// past NEXT, or the queue does not follow the 7-bag at `first_index` (the
+/// absolute queue index of Current).
+pub fn staged_moves(
+    finder: &mut Finder,
+    observation: &Observation,
+    first_index: usize,
+) -> Vec<StagedMove> {
+    let Some(field) = board_field(&observation.board) else {
+        return Vec::new();
+    };
+    let top = observation
+        .board
+        .iter()
+        .rposition(|row| row.iter().any(Option::is_some))
+        .map_or(0, |y| y + 1);
+    let filled = field.count_ones() as usize;
+    // The lowest height with a whole number of pieces, as for
+    // `Finder::perfect_clears`.
+    let Some(pieces) = (top.max(1)..=4)
+        .map(|height| height * 10 - filled)
+        .find(|empty| empty.is_multiple_of(4))
+        .map(|empty| empty / 4)
+    else {
+        return Vec::new();
+    };
+    // One piece may stay in HOLD; without HOLD yet, the queue gives it.
+    let length = pieces + usize::from(observation.hold.is_none());
+    let queue = visible_queue(observation);
+    // A built setup needs at most the piece past NEXT. Keep the search
+    // bounded for boards still far from their perfect clear.
+    if length > queue.len() + STAGED_UNSEEN {
+        return Vec::new();
+    }
+    let mut completions = Vec::new();
+    let consistent =
+        for_each_bag_completion(&mut queue.clone(), first_index, length, &mut |queue| {
+            completions.push(queue.to_vec())
+        });
+    if !consistent || completions.is_empty() {
+        return Vec::new();
+    }
+    let step = completions.len().div_ceil(RATE_SAMPLES);
+    let completions: Vec<Vec<Piece>> = completions.into_iter().step_by(step).collect();
+    let current = observation.current;
+    // The first piece and the supply after it: Current, or the piece HOLD
+    // gives (the next one when HOLD is empty).
+    let mut firsts = vec![(current, observation.hold, 1)];
+    match observation.hold {
+        Some(held) if held != current => firsts.push((held, Some(current), 1)),
+        Some(_) => {}
+        None => firsts.push((observation.next5[0], Some(current), 2)),
+    }
+    let mut outcomes: HashMap<(Mask, Option<Piece>, usize), usize> = HashMap::new();
+    let mut staged = Vec::new();
+    for (piece, hold, next) in firsts {
+        for &cells in finder.moves(field, piece).iter() {
+            let after = clear_full_rows(field | cells);
+            let cleared = *outcomes.entry((after, hold, next)).or_insert_with(|| {
+                if after == 0 {
+                    return completions.len();
+                }
+                let queues: Vec<&[Piece]> = completions
+                    .iter()
+                    .map(|queue| &queue[next.min(queue.len())..])
+                    .collect();
+                finder
+                    .perfect_clear_queues(after, hold, &queues)
+                    .into_iter()
+                    .filter(|found| *found)
+                    .count()
+            });
+            if cleared > 0 {
+                staged.push(StagedMove {
+                    piece,
+                    cells: mask_cells(cells),
+                    cleared,
+                    total: completions.len(),
+                });
+            }
+        }
+    }
+    // Stable: ties keep Current first.
+    staged.sort_by_key(|staged| std::cmp::Reverse(staged.cleared));
+    staged
+}
+
+/// Pieces past NEXT `staged_moves` looks at most.
+/// With two, `staged_time` measured 13 ms mean and 32 ms worst for two
+/// pieces placed, down from 115 ms mean and 242 ms worst.
+pub const STAGED_UNSEEN: usize = 2;
+
+/// `field` with its full rows removed and the rows above dropped.
+fn clear_full_rows(field: Mask) -> Mask {
+    let full: Mask = (1 << 10) - 1;
+    let mut kept = 0;
+    let mut row = 0;
+    for y in 0..finder::FIELD_ROWS {
+        let line = (field >> (y * 10)) & full;
+        if line != full {
+            kept |= line << (row * 10);
+            row += 1;
+        }
+    }
+    kept
+}
+
+/// The board cells of a live mask.
+fn mask_cells(mask: Mask) -> Vec<Cell> {
+    (0..finder::FIELD_ROWS as u32 * 10)
+        .filter(|index| mask & (1 << index) != 0)
+        .map(|index| Cell {
+            x: (index % 10) as u8,
+            y: (index / 10) as u8,
+        })
+        .collect()
+}
+
 /// Orders of the undisclosed pieces `state_pc_rate` checks at most.
 pub const RATE_SAMPLES: usize = 120;
 
@@ -1070,5 +1206,49 @@ mod tests {
         assert_eq!(cache_file_name(3), "3rd.csv");
         assert_eq!(stage_label(7), "7th");
         assert_eq!(stage_label(8), "?");
+    }
+
+    #[test]
+    fn a_staged_move_keeps_the_perfect_clear_for_every_order() {
+        use Piece::*;
+        // LZ-ISO built on a 4th PC (Current at index 34): with J the last
+        // piece shown, HOLD and NEXT have no perfect clear, as it needs the
+        // piece after J. Some first placement keeps one for every order.
+        let mut board = empty_board();
+        for (x, y, piece) in [
+            (0, 0, S),
+            (1, 0, S),
+            (1, 1, S),
+            (2, 1, S),
+            (7, 0, O),
+            (8, 0, O),
+            (7, 1, O),
+            (8, 1, O),
+            (9, 0, I),
+            (9, 1, I),
+            (9, 2, I),
+            (9, 3, I),
+        ] {
+            board[y][x] = Some(piece);
+        }
+        let built = Observation {
+            board,
+            hold: Some(T),
+            current: Z,
+            next5: [I, T, S, Z, J],
+        };
+        let mut finder = Finder::new();
+        assert!(find_perfect_clears(&mut finder, &built, 1).is_empty());
+        let staged = staged_moves(&mut finder, &built, 34);
+        let best = &staged[0];
+        assert_eq!((best.cleared, best.total), (2, 2), "{staged:?}");
+        assert!([Z, T].contains(&best.piece) && best.cells.len() == 4);
+        // Rates fall off from the best, and the queue must follow the bag.
+        assert!(
+            staged
+                .windows(2)
+                .all(|pair| pair[0].cleared >= pair[1].cleared)
+        );
+        assert!(staged_moves(&mut finder, &built, 35).is_empty());
     }
 }

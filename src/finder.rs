@@ -320,15 +320,7 @@ impl Target {
 
     /// The live field for `placed` drawing cells: cleared rows removed.
     pub fn field(&self, placed: Mask) -> Mask {
-        let cleared = self.cleared(placed);
-        let map = Self::row_map(&cleared);
-        let mut field = 0;
-        for (field_row, drawing_row) in map.iter().enumerate() {
-            if *drawing_row < FIELD_ROWS {
-                field |= ((placed >> (drawing_row * 10)) & ROW) << (field_row * 10);
-            }
-        }
-        field
+        self.to_field(placed, placed)
     }
 
     /// Maps field cells to drawing cells for `placed`; `None` when a cell
@@ -504,11 +496,28 @@ impl Finder {
         self.moves.clear();
     }
 
-    fn moves(&mut self, field: Mask, piece: Piece) -> Rc<[Mask]> {
+    /// The live placements `piece` can lock at on `field` (cached).
+    pub(crate) fn moves(&mut self, field: Mask, piece: Piece) -> Rc<[Mask]> {
         self.moves
             .entry((field, piece))
             .or_insert_with(|| lockable_placements(field, piece).into())
             .clone()
+    }
+
+    /// A drawn piece already has a valid shape. A clear vertical path from
+    /// above is enough; only tucks and spins need the full move search.
+    fn can_lock(&mut self, field: Mask, piece: Piece, cells: Mask) -> bool {
+        if cells & field != 0 || (cells & ROW == 0 && (cells >> 10) & field == 0) {
+            return false;
+        }
+        let mut above = cells;
+        for _ in 1..FIELD_ROWS {
+            above = (above << 10) & ((1 << (FIELD_ROWS * 10)) - 1);
+            if above & field != 0 {
+                return self.moves(field, piece).binary_search(&cells).is_ok();
+            }
+        }
+        true
     }
 
     /// Whether `target` can be finished from `placed` drawing cells, with
@@ -779,8 +788,8 @@ impl Target {
 
     /// Rows of `placed` that have cleared, a bit per row.
     fn cleared_bits(&self, placed: Mask) -> u8 {
-        self.cleared(placed)
-            .iter()
+        self.full_rows()
+            .filter(|row| placed & row_mask(*row) == row_mask(*row))
             .fold(0, |bits, row| bits | 1 << row)
     }
 
@@ -838,6 +847,22 @@ impl Finder {
             .find(|y| target.cells & row_mask(*y) != 0)
             .map_or(0, |y| y + 1);
         let table = self.drawn_table(rows);
+        let table = DrawnTable {
+            by_lowest: table
+                .by_lowest
+                .iter()
+                .map(|placements| {
+                    placements
+                        .iter()
+                        .copied()
+                        .filter(|drawn| {
+                            drawn.cells & !(target.cells & !placed) == 0
+                                && drawn.cells & !target.allowed(drawn.piece) == 0
+                        })
+                        .collect()
+                })
+                .collect(),
+        };
         let mut search = Solutions {
             target,
             placed,
@@ -882,6 +907,247 @@ impl Finder {
         }
         None
     }
+
+    /// Whether each queue can perfect clear this field. Tiling is shared
+    /// across queues, and starts at the empty cell with the fewest options.
+    pub(crate) fn perfect_clear_queues(
+        &mut self,
+        field: Mask,
+        hold: Option<Piece>,
+        queues: &[&[Piece]],
+    ) -> Vec<bool> {
+        assert!(queues.len() <= 128);
+        if queues.is_empty() {
+            return Vec::new();
+        }
+        let mut found = 0u128;
+        let all = u128::MAX >> (128 - queues.len());
+        let top = (0..FIELD_ROWS)
+            .rev()
+            .find(|y| field & row_mask(*y) != 0)
+            .map_or(0, |y| y + 1);
+        for height in top.max(1)..=4 {
+            let empty_cells = height * 10 - field.count_ones() as usize;
+            if !empty_cells.is_multiple_of(4) {
+                continue;
+            }
+            let mut eligible = 0;
+            let mut available = [[0u128; 16]; 7];
+            for (index, queue) in queues.iter().enumerate() {
+                let bit = 1u128 << index;
+                if found & bit != 0 || queue.len() + usize::from(hold.is_some()) < empty_cells / 4 {
+                    continue;
+                }
+                eligible |= bit;
+                let mut counts = [0usize; 7];
+                for piece in hold.iter().chain(queue.iter()) {
+                    counts[piece_index(*piece)] += 1;
+                }
+                for (piece, count) in counts.into_iter().enumerate() {
+                    for queues in available[piece].iter_mut().take(count.min(15) + 1).skip(1) {
+                        *queues |= bit;
+                    }
+                }
+            }
+            if eligible == 0 {
+                continue;
+            }
+            let target = Target::perfect_clear(height).expect("4 rows fit the field");
+            let empty = target.cells & !field;
+            let drawn = self.drawn_table(height);
+            let table = QueueTable::new(&drawn, empty);
+            let mut search = QueueTilings {
+                search: Solutions {
+                    target: &target,
+                    placed: field,
+                    queue: queues[0],
+                    start: SupplyState::Queue { hold, next: 0 },
+                    table: &drawn,
+                    tiling: Vec::new(),
+                    found: Vec::new(),
+                    limit: 1,
+                },
+                table: &table,
+                queues,
+                available,
+                found: 0,
+                failed: Vec::new(),
+            };
+            let mut layers = vec![vec![0; table.words]; empty_cells / 4 + 1];
+            let (active, scratch) = layers.split_first_mut().expect("at least one layer");
+            active.fill(u64::MAX);
+            search.tile(self, empty, [0; 7], eligible, active, scratch);
+            found |= search.found;
+            if found == all {
+                break;
+            }
+        }
+        (0..queues.len())
+            .map(|index| found & (1 << index) != 0)
+            .collect()
+    }
+}
+
+/// Bit sets of placements covering each cell, for the shared tiling search.
+struct QueueTable {
+    placements: Vec<DrawnPiece>,
+    words: usize,
+    by_cell: Vec<Vec<u64>>,
+    by_piece: [Vec<u64>; 7],
+    overlap: Vec<Vec<u64>>,
+}
+
+impl QueueTable {
+    fn new(drawn: &DrawnTable, empty: Mask) -> Self {
+        let placements: Vec<DrawnPiece> = drawn
+            .by_lowest
+            .iter()
+            .flatten()
+            .copied()
+            .filter(|drawn| drawn.cells & !empty == 0)
+            .collect();
+        let words = placements.len().div_ceil(64);
+        let mut by_cell = vec![vec![0; words]; FIELD_ROWS * 10];
+        let mut by_piece: [Vec<u64>; 7] = std::array::from_fn(|_| vec![0; words]);
+        for (index, drawn) in placements.iter().enumerate() {
+            let mut cells = drawn.cells;
+            while cells != 0 {
+                by_cell[cells.trailing_zeros() as usize][index / 64] |= 1 << (index % 64);
+                cells &= cells - 1;
+            }
+            by_piece[piece_index(drawn.piece)][index / 64] |= 1 << (index % 64);
+        }
+        let overlap = placements
+            .iter()
+            .map(|drawn| {
+                let mut overlaps = vec![0; words];
+                let mut cells = drawn.cells;
+                while cells != 0 {
+                    for (word, covers) in overlaps
+                        .iter_mut()
+                        .zip(&by_cell[cells.trailing_zeros() as usize])
+                    {
+                        *word |= covers;
+                    }
+                    cells &= cells - 1;
+                }
+                overlaps
+            })
+            .collect();
+        Self {
+            placements,
+            words,
+            by_cell,
+            by_piece,
+            overlap,
+        }
+    }
+}
+
+/// One tiling search for several queues (one bit per queue).
+struct QueueTilings<'a> {
+    search: Solutions<'a>,
+    table: &'a QueueTable,
+    queues: &'a [&'a [Piece]],
+    /// Queues with at least this many of each piece, including HOLD.
+    available: [[u128; 16]; 7],
+    found: u128,
+    failed: Vec<(u16, SupplyState)>,
+}
+
+impl QueueTilings<'_> {
+    fn tile(
+        &mut self,
+        finder: &mut Finder,
+        empty: Mask,
+        counts: [u8; 7],
+        eligible: u128,
+        active: &mut [u64],
+        scratch: &mut [Vec<u64>],
+    ) {
+        let mut eligible = eligible & !self.found;
+        if eligible == 0 {
+            return;
+        }
+        if empty == 0 {
+            while eligible != 0 {
+                let index = eligible.trailing_zeros() as usize;
+                self.search.queue = self.queues[index];
+                self.failed.clear();
+                if self.search.playable(
+                    finder,
+                    self.search.placed,
+                    self.search.start,
+                    0,
+                    &mut self.failed,
+                ) {
+                    self.found |= 1 << index;
+                }
+                eligible &= eligible - 1;
+            }
+            return;
+        }
+        let table = self.table;
+        for (piece, count) in counts.iter().enumerate() {
+            if self.available[piece][usize::from(*count) + 1] & eligible == 0 {
+                for (word, pieces) in active.iter_mut().zip(&table.by_piece[piece]) {
+                    *word &= !pieces;
+                }
+            }
+        }
+        let mut cells = empty;
+        let mut best = 0;
+        let mut fewest = usize::MAX;
+        while cells != 0 {
+            let cell = cells.trailing_zeros() as usize;
+            let mut n = 0;
+            for (word, covers) in active.iter().zip(&table.by_cell[cell]) {
+                n += (word & covers).count_ones() as usize;
+                if n >= fewest {
+                    break;
+                }
+            }
+            if n == 0 {
+                return;
+            }
+            if n < fewest {
+                best = cell;
+                fewest = n;
+                if n == 1 {
+                    break;
+                }
+            }
+            cells &= cells - 1;
+        }
+        for (word_index, (word, covers)) in active.iter().zip(&table.by_cell[best]).enumerate() {
+            let mut choices = word & covers;
+            while choices != 0 {
+                let index = word_index * 64 + choices.trailing_zeros() as usize;
+                let drawn = table.placements[index];
+                let piece = piece_index(drawn.piece);
+                let mut used = counts;
+                used[piece] += 1;
+                let queues = eligible & self.available[piece][usize::from(used[piece])];
+                if queues != 0 {
+                    let (next, rest) = scratch.split_first_mut().expect("one layer per piece");
+                    for ((next, word), conflict) in next
+                        .iter_mut()
+                        .zip(active.iter())
+                        .zip(&table.overlap[index])
+                    {
+                        *next = word & !conflict;
+                    }
+                    self.search.tiling.push(drawn);
+                    self.tile(finder, empty & !drawn.cells, used, queues, next, rest);
+                    self.search.tiling.pop();
+                    if eligible & !self.found == 0 {
+                        return;
+                    }
+                }
+                choices &= choices - 1;
+            }
+        }
+    }
 }
 
 /// One run of `Finder::solutions`.
@@ -905,7 +1171,7 @@ impl Solutions<'_> {
             return;
         }
         if empty == 0 {
-            let mut failed = HashSet::new();
+            let mut failed = Vec::new();
             if self.playable(finder, self.placed, self.start, 0, &mut failed) {
                 let mut steps: Vec<Step> = self
                     .tiling
@@ -942,7 +1208,7 @@ impl Solutions<'_> {
         placed: Mask,
         state: SupplyState,
         used: u16,
-        failed: &mut HashSet<(u16, SupplyState)>,
+        failed: &mut Vec<(u16, SupplyState)>,
     ) -> bool {
         if usize::from(used) == (1 << self.tiling.len()) - 1 {
             return true;
@@ -953,13 +1219,12 @@ impl Solutions<'_> {
         let cleared = self.target.cleared_bits(placed);
         let field = self.target.field(placed);
         for (piece, after) in supply_options(self.queue, state) {
-            let moves = finder.moves(field, piece);
             for (step, drawn) in self.tiling.iter().enumerate() {
                 if used & (1 << step) != 0 || drawn.piece != piece || drawn.gaps & !cleared != 0 {
                     continue;
                 }
                 let live = self.target.to_field(placed, drawn.cells);
-                if moves.binary_search(&live).is_ok()
+                if finder.can_lock(field, piece, live)
                     && self.playable(
                         finder,
                         placed | drawn.cells,
@@ -972,18 +1237,26 @@ impl Solutions<'_> {
                 }
             }
         }
-        failed.insert((used, state));
+        failed.push((used, state));
         false
     }
 }
 
 /// The pieces the supply can play next, with its state afterwards.
-fn supply_options(queue: &[Piece], state: SupplyState) -> Vec<(Piece, SupplyState)> {
-    let mut options = Vec::new();
+fn supply_options(
+    queue: &[Piece],
+    state: SupplyState,
+) -> impl Iterator<Item = (Piece, SupplyState)> {
+    let mut options = [None; 7];
+    let mut length = 0;
+    let mut push = |option| {
+        options[length] = Some(option);
+        length += 1;
+    };
     match state {
         SupplyState::Queue { hold, next } => {
             if let Some(&current) = queue.get(next) {
-                options.push((
+                push((
                     current,
                     SupplyState::Queue {
                         hold,
@@ -991,7 +1264,7 @@ fn supply_options(queue: &[Piece], state: SupplyState) -> Vec<(Piece, SupplyStat
                     },
                 ));
                 match hold {
-                    Some(held) if held != current => options.push((
+                    Some(held) if held != current => push((
                         held,
                         SupplyState::Queue {
                             hold: Some(current),
@@ -1001,7 +1274,7 @@ fn supply_options(queue: &[Piece], state: SupplyState) -> Vec<(Piece, SupplyStat
                     Some(_) => {}
                     None => {
                         if let Some(&after) = queue.get(next + 1) {
-                            options.push((
+                            push((
                                 after,
                                 SupplyState::Queue {
                                     hold: Some(current),
@@ -1013,7 +1286,7 @@ fn supply_options(queue: &[Piece], state: SupplyState) -> Vec<(Piece, SupplyStat
                 }
             } else if let Some(held) = hold {
                 // The queue is used up; HOLD can still be played.
-                options.push((held, SupplyState::Queue { hold: None, next }));
+                push((held, SupplyState::Queue { hold: None, next }));
             }
         }
         SupplyState::AnyOrder(counts) => {
@@ -1021,12 +1294,12 @@ fn supply_options(queue: &[Piece], state: SupplyState) -> Vec<(Piece, SupplyStat
                 if counts[index] > 0 {
                     let mut left = counts;
                     left[index] -= 1;
-                    options.push((*piece, SupplyState::AnyOrder(left)));
+                    push((*piece, SupplyState::AnyOrder(left)));
                 }
             }
         }
     }
-    options
+    options.into_iter().take(length).flatten()
 }
 
 /// The pieces each undisclosed position may hold under the 7-bag, given the
