@@ -20,7 +20,7 @@ use thiserror::Error;
 use crate::{
     finder::{self, Buildable, Finder, Mask, Step, Supply, Target},
     fumen::{FumenCell, decode_first_page},
-    model::{Board, Cell, Observation, Piece},
+    model::{Board, Cell, Observation, Piece, Placement},
 };
 
 pub const SPREADSHEET_ID: &str = "1tI9fPeeEEEhWS2h0Gzib5UIjLKN33wd18WQSKRjxYMw";
@@ -237,6 +237,77 @@ impl FoundSolve {
             .solutions(&self.target, progress.placed, supply, 1)
             .is_empty()
     }
+}
+
+/// Whether the board follows the drawing `placements` (a source setup and
+/// solve, rows not cleared) and its pieces left can be played with the HOLD,
+/// Current, and NEXT shown now (SRS+, one HOLD slot), as
+/// `FoundSolve::playable`. Pieces after NEXT, which a drawing may need, are
+/// taken from `later` in any order (the rest of the bag), and are any piece
+/// once `later` runs out.
+pub fn placements_playable(
+    finder: &mut Finder,
+    placements: &[Placement],
+    observation: &Observation,
+    later: &[Piece],
+) -> bool {
+    let cells: Vec<FumenCell> = placements
+        .iter()
+        .flat_map(|placement| {
+            placement.cells.iter().map(|cell| FumenCell {
+                cell: *cell,
+                piece: Some(placement.piece),
+            })
+        })
+        .collect();
+    let Some(target) = Target::new(
+        cells
+            .iter()
+            .map(|cell| (cell.cell.x, cell.cell.y, cell.piece)),
+    ) else {
+        return false;
+    };
+    let Some(progress) = drawing_progress(&target, &cells, &observation.board) else {
+        return false;
+    };
+    // Every placement takes a queue piece (Current, or one swapped into
+    // HOLD), and a first HOLD into an empty slot takes one more.
+    let left = (target.cells & !progress.placed).count_ones() as usize / 4;
+    let useful = left + usize::from(observation.hold.is_none());
+    let shown = visible_queue(observation);
+    let mut queues = vec![(shown, later.to_vec())];
+    for _ in 0..useful.saturating_sub(queues[0].0.len()) {
+        queues = queues
+            .into_iter()
+            .flat_map(|(queue, rest)| {
+                let options: Vec<(Piece, Vec<Piece>)> = if rest.is_empty() {
+                    PIECES.iter().map(|piece| (*piece, Vec::new())).collect()
+                } else {
+                    (0..rest.len())
+                        .filter(|at| !rest[..*at].contains(&rest[*at]))
+                        .map(|at| {
+                            let mut rest = rest.clone();
+                            (rest.remove(at), rest)
+                        })
+                        .collect()
+                };
+                options.into_iter().map(move |(piece, rest)| {
+                    let mut queue = queue.clone();
+                    queue.push(piece);
+                    (queue, rest)
+                })
+            })
+            .collect();
+    }
+    queues.iter().any(|(queue, _)| {
+        let supply = Supply::Queue {
+            hold: observation.hold,
+            queue,
+        };
+        !finder
+            .solutions(&target, progress.placed, supply, 1)
+            .is_empty()
+    })
 }
 
 /// Current followed by NEXT.
