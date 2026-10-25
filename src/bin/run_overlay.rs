@@ -17,6 +17,7 @@ use pc_overlay_core::{
     konbini,
     konbini::{BuildQuery, FoundSolve, KonbiniLibrary, KonbiniProgress},
     piece_code,
+    seed::LiveSeed,
     tracker::case_size,
     window::foreground_handle,
 };
@@ -85,9 +86,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut prefer_konbini = false;
     // Whether the last stable frame showed a completed setup with a solve.
     let mut solve_available = false;
+    // Ctrl+Alt+S: the solve search also uses the queue of the estimated seed.
+    let mut use_seed = false;
+    let mut live_seed = LiveSeed::new();
     let mut overlay = OverlayWindow::new()?;
     println!(
-        "run-overlay started; Ctrl+Alt+1..7 resynchronizes the PC number; S shows / Ctrl+Alt+S toggles the solve once the setup is complete; Ctrl+Alt+N / Ctrl+Alt+B switch setups; Ctrl+Alt+K makes the 2nd and 7th PCs use Setup Konbini; Ctrl+Alt+F refetches Setup Konbini; press Ctrl+C to stop"
+        "run-overlay started; Ctrl+Alt+1..7 resynchronizes the PC number; S shows the solve once the setup is complete; Ctrl+Alt+S turns the seed queue (pieces after NEXT from the seed estimated from the pieces seen) ON / OFF; Ctrl+Alt+N / Ctrl+Alt+B switch setups; Ctrl+Alt+K makes the 2nd and 7th PCs use Setup Konbini; Ctrl+Alt+F refetches Setup Konbini; press Ctrl+C to stop"
     );
 
     loop {
@@ -113,12 +117,16 @@ fn main() -> Result<(), Box<dyn Error>> {
                 }
                 Hotkey::Konbini(hotkey) => konbini.apply(hotkey),
                 Hotkey::Game(key) => tracker.note_key(key, unix_ms()),
-                Hotkey::Solve(hotkey) => {
-                    if let Some(notice) = apply_solve_hotkey(&mut tracker, hotkey, solve_available)
-                    {
+                Hotkey::ShowSolve => {
+                    if let Some(notice) = apply_solve_hotkey(&mut tracker, solve_available) {
                         eprintln!("{notice}");
                         solve_notice = Some((notice, Instant::now()));
                     }
+                }
+                Hotkey::SeedQueue => {
+                    let notice = toggle_seed_queue(&mut use_seed);
+                    eprintln!("{notice}");
+                    solve_notice = Some((notice, Instant::now()));
                 }
             }
         }
@@ -180,6 +188,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                     )),
                     _ => None,
                 };
+                // A seed belongs to one game; Undo keeps it.
+                if matches!(commit, Some(CommitOutcome::NewGame { .. })) {
+                    live_seed.reset();
+                }
                 if let (Some(CommitOutcome::Resynced { snapshot }), Some(previous)) =
                     (&commit, previous_next)
                 {
@@ -213,6 +225,14 @@ fn main() -> Result<(), Box<dyn Error>> {
                 // Always the guidance for the last tracked state, so it stays
                 // on screen while recognition pauses (a piece falling below
                 // the spawn rows, or frames settling after a lock).
+                konbini.later = match tracker.snapshots().last() {
+                    Some(snapshot) if use_seed => {
+                        let (run, from_start) = tracker.spawn_run();
+                        live_seed.update(run, from_start);
+                        live_seed.later(seed_lookahead(&snapshot.observation))
+                    }
+                    _ => Vec::new(),
+                };
                 let guide = tracker.snapshots().last().map(|snapshot| {
                     unified_guidance(
                         &library,
@@ -237,10 +257,17 @@ fn main() -> Result<(), Box<dyn Error>> {
                     guide,
                     args.verbose,
                 );
+                if use_seed {
+                    state.status.push_str(" | ");
+                    state.status.push_str(&live_seed.status());
+                }
                 if let Some(notice) = active_notice {
                     state.status.push_str(" | ");
                     state.status.push_str(notice);
                 }
+                state
+                    .detail
+                    .push_str(if use_seed { "  seed ON" } else { "  seed OFF" });
                 overlay.update(Some(window.client_rect), state)?;
             }
             Ok(None) => {
@@ -288,21 +315,17 @@ impl PiecesReading {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SolveHotkey {
-    /// Ctrl+Alt+S: show or hide.
-    Toggle,
-    /// Plain S: only shows, so S doubling as a game key never hides a solve.
-    Show,
-}
-
 /// A hotkey press, as delivered by the keyboard hook.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Hotkey {
     /// Ctrl+Alt+1..7: resynchronize the PC number.
     Resync(PcOrdinal),
-    /// S or Ctrl+Alt+S.
-    Solve(SolveHotkey),
+    /// Plain S: shows the solve. It only shows, so S doubling as a game key
+    /// never hides one.
+    ShowSolve,
+    /// Ctrl+Alt+S: whether the solve search uses the queue of the seed
+    /// estimated from the pieces seen (`seed::LiveSeed`).
+    SeedQueue,
     /// Ctrl+Alt+K / N / B / F.
     Konbini(KonbiniHotkey),
     /// TETR.IO's own retry (`retry_key`), undo (Ctrl+Z) and redo (Ctrl+Y),
@@ -314,8 +337,8 @@ enum Hotkey {
 /// Alt are held and the virtual key of TETR.IO's retry.
 fn hotkey_for(key: u32, ctrl: bool, alt: bool, retry_key: u32) -> Option<Hotkey> {
     match (key, ctrl && alt) {
-        (0x53, true) => Some(Hotkey::Solve(SolveHotkey::Toggle)),
-        (0x53, false) => Some(Hotkey::Solve(SolveHotkey::Show)),
+        (0x53, true) => Some(Hotkey::SeedQueue),
+        (0x53, false) => Some(Hotkey::ShowSolve),
         (0x5A, false) if ctrl => Some(Hotkey::Game(GameKey::Undo)),
         (0x59, false) if ctrl => Some(Hotkey::Game(GameKey::Redo)),
         (_, false) if !ctrl && !alt && key == retry_key => Some(Hotkey::Game(GameKey::Retry)),
@@ -484,28 +507,49 @@ mod keyboard_hook {
 /// How long a hotkey notice stays on the status line.
 const SOLVE_NOTICE_DURATION: Duration = Duration::from_millis(1500);
 
-/// Applies a solve hotkey press. Turning the display ON is accepted only once
-/// the setup is complete; turning it OFF is always accepted. Returns the
-/// notice for the status line, or `None` when the press changes nothing.
-fn apply_solve_hotkey(
-    tracker: &mut SessionTracker,
-    hotkey: SolveHotkey,
-    setup_complete: bool,
-) -> Option<&'static str> {
-    let shown = tracker.guidance().show_solve;
-    match (hotkey, shown) {
-        (SolveHotkey::Show, true) => None,
-        (SolveHotkey::Toggle, true) => {
-            tracker.toggle_show_solve();
-            Some("solve hidden")
-        }
-        (_, false) if !setup_complete => Some("solve hotkey ignored: setup not complete"),
-        (_, false) => {
-            tracker.toggle_show_solve();
-            Some("solve shown")
-        }
+/// Applies an `S` press: the solve display turns ON once the setup is
+/// complete. Returns the notice for the status line, or `None` when the
+/// press changes nothing.
+fn apply_solve_hotkey(tracker: &mut SessionTracker, setup_complete: bool) -> Option<&'static str> {
+    if tracker.guidance().show_solve {
+        None
+    } else if !setup_complete {
+        Some("solve hotkey ignored: setup not complete")
+    } else {
+        tracker.toggle_show_solve();
+        Some("solve shown")
     }
 }
+
+/// Applies Ctrl+Alt+S: turns the seed queue ON or OFF and returns the notice.
+fn toggle_seed_queue(use_seed: &mut bool) -> &'static str {
+    *use_seed = !*use_seed;
+    if *use_seed {
+        "seed queue ON"
+    } else {
+        "seed queue OFF"
+    }
+}
+
+/// Pieces after NEXT the solve search takes from a confirmed seed: enough
+/// for a 4-line perfect clear from the board, plus one so HOLD keeps a
+/// choice, beyond HOLD, Current and NEXT.
+fn seed_lookahead(observation: &pc_overlay_core::Observation) -> usize {
+    let filled = observation
+        .board
+        .iter()
+        .take(4)
+        .flatten()
+        .filter(|cell| cell.is_some())
+        .count();
+    let needed = 40usize.saturating_sub(filled).div_ceil(4) + 1;
+    let shown = 6 + usize::from(observation.hold.is_some());
+    needed.saturating_sub(shown).min(SEED_LOOKAHEAD_LIMIT)
+}
+
+/// At most this many pieces after NEXT, so a search stays within a frame
+/// or so (a 1st PC from an empty board without HOLD needs 5).
+const SEED_LOOKAHEAD_LIMIT: usize = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum KonbiniHotkey {
@@ -625,7 +669,10 @@ struct KonbiniGuide {
     solve: Option<SolveSession>,
     /// The last state searched for a perfect clear, so a state without one
     /// is searched once.
-    searched: Option<pc_overlay_core::Observation>,
+    searched: Option<(pc_overlay_core::Observation, Vec<Piece>)>,
+    /// Pieces after NEXT from the confirmed seed while the seed queue is
+    /// ON (Ctrl+Alt+S), else empty: the solve search may use them.
+    later: Vec<Piece>,
     /// The PC rate of the setup last seen complete in this PC, kept for the
     /// solves searched from it.
     built_rate: Option<f32>,
@@ -647,6 +694,10 @@ struct SolveSession {
     pc_rate: Option<f32>,
     /// The state `solves` were last checked against.
     checked: pc_overlay_core::Observation,
+    /// The pieces after NEXT, from the seed, they were checked with.
+    checked_later: Vec<Piece>,
+    /// Whether the search had pieces after NEXT from the seed.
+    seeded: bool,
 }
 
 /// Placements of the next piece (`konbini::staged_moves`) for the state
@@ -695,6 +746,7 @@ impl KonbiniGuide {
             shortlist: None,
             solve: None,
             searched: None,
+            later: Vec::new(),
             built_rate: None,
             two_line: None,
             two_line_shown: false,
@@ -789,6 +841,8 @@ impl KonbiniGuide {
                 index: 0,
                 pc_rate: None,
                 checked: observation.clone(),
+                checked_later: Vec::new(),
+                seeded: false,
             });
         }
         let guide = self
@@ -900,12 +954,14 @@ impl KonbiniGuide {
         // Keep only the solves the pieces shown now can still finish: the
         // player may have used HOLD or an order the solve does not allow.
         if let Some(session) = self.solve.as_mut()
-            && session.checked != *observation
+            && (session.checked != *observation || session.checked_later != self.later)
         {
+            let later = &self.later;
             session
                 .solves
-                .retain(|solve| solve.playable(&mut self.finder, observation));
+                .retain(|solve| solve.playable_after(&mut self.finder, observation, later));
             session.checked = observation.clone();
+            session.checked_later = later.clone();
             if session.solves.is_empty() {
                 self.solve = None;
             }
@@ -922,12 +978,23 @@ impl KonbiniGuide {
             self.built_rate = guide.pc_rate;
         }
         let board_off_setup = shortlist.is_empty() && !board_is_empty(&observation.board);
-        if (shown_complete || board_off_setup) && self.searched.as_ref() != Some(observation) {
+        if (shown_complete || board_off_setup)
+            && self
+                .searched
+                .as_ref()
+                .is_none_or(|(searched, later)| searched != observation || *later != self.later)
+        {
             // A built setup, or a board no setup explains (the player went
-            // their own way): search the perfect clears from here.
-            self.searched = Some(observation.clone());
+            // their own way): search the perfect clears from here, with the
+            // seed's pieces after NEXT when the seed queue is ON.
+            self.searched = Some((observation.clone(), self.later.clone()));
             self.staged = None;
-            let solves = konbini::find_perfect_clears(&mut self.finder, observation, SOLVE_LIMIT);
+            let solves = konbini::find_perfect_clears_after(
+                &mut self.finder,
+                observation,
+                &self.later,
+                SOLVE_LIMIT,
+            );
             if solves.is_empty() {
                 // None with the pieces shown: the next placement that keeps
                 // one for the most orders after NEXT, a piece at a time.
@@ -960,6 +1027,8 @@ impl KonbiniGuide {
                     index: 0,
                     pc_rate: self.built_rate,
                     checked: observation.clone(),
+                    checked_later: self.later.clone(),
+                    seeded: !self.later.is_empty(),
                 });
                 if let Some(guide) = solve_guide(&mut self.solve, snapshot, show) {
                     return guide;
@@ -1015,14 +1084,15 @@ fn solve_guide(
     };
     session.index = position as isize;
     let height = session.solves[position].height;
+    let seeded = if session.seeded { ", seed queue" } else { "" };
     let status = if show {
         format!(
-            "PC Overlay [Konbini {stage}]: perfect clear {}/{count} (search, SRS+, {height} lines); Ctrl+Alt+N/B to switch",
+            "PC Overlay [Konbini {stage}]: perfect clear {}/{count} (search, SRS+, {height} lines{seeded}); Ctrl+Alt+N/B to switch",
             position + 1
         )
     } else {
         format!(
-            "PC Overlay [Konbini {stage}]: {count} perfect clear(s) found ({height} lines); press S to show the solve"
+            "PC Overlay [Konbini {stage}]: {count} perfect clear(s) found ({height} lines{seeded}); press S to show the solve"
         )
     };
     let cells = if show {
@@ -2367,8 +2437,8 @@ mod tests {
         let plain = |key| hotkey_for(key, false, false, VK_R);
         let ctrl_alt = |key| hotkey_for(key, true, true, VK_R);
         let ctrl = |key| hotkey_for(key, true, false, VK_R);
-        assert_eq!(plain(VK_S), Some(Hotkey::Solve(SolveHotkey::Show)));
-        assert_eq!(ctrl_alt(VK_S), Some(Hotkey::Solve(SolveHotkey::Toggle)));
+        assert_eq!(plain(VK_S), Some(Hotkey::ShowSolve));
+        assert_eq!(ctrl_alt(VK_S), Some(Hotkey::SeedQueue));
         assert_eq!(
             ctrl_alt(0x33),
             Some(Hotkey::Resync(PcOrdinal::new(3).unwrap()))
@@ -2409,16 +2479,14 @@ mod tests {
         let setup = rules.setup("ijlo_source_method", "ijlo_s_queue").unwrap();
         let mut tracker = s_queue_pc_two();
 
-        // Before completion both keys are ignored and the setup cells stay.
+        // Before completion S is ignored and the setup cells stay.
         commit_board(&mut tracker, board_with(&setup.placements[..3]), 3);
         assert!(!latest_setup_complete(&rules, &tracker, true));
-        for hotkey in [SolveHotkey::Show, SolveHotkey::Toggle] {
-            assert_eq!(
-                apply_solve_hotkey(&mut tracker, hotkey, false),
-                Some("solve hotkey ignored: setup not complete")
-            );
-            assert!(!tracker.guidance().show_solve);
-        }
+        assert_eq!(
+            apply_solve_hotkey(&mut tracker, false),
+            Some("solve hotkey ignored: setup not complete")
+        );
+        assert!(!tracker.guidance().show_solve);
         let (status, _) = latest_guidance(&rules, &tracker);
         assert!(status.contains("IJLO guidance active"), "{status}");
 
@@ -2429,26 +2497,10 @@ mod tests {
         assert!(cells.is_empty());
 
         // Plain S shows it and never hides it again.
-        assert_eq!(
-            apply_solve_hotkey(&mut tracker, SolveHotkey::Show, true),
-            Some("solve shown")
-        );
-        assert_eq!(
-            apply_solve_hotkey(&mut tracker, SolveHotkey::Show, true),
-            None
-        );
+        assert_eq!(apply_solve_hotkey(&mut tracker, true), Some("solve shown"));
+        assert_eq!(apply_solve_hotkey(&mut tracker, true), None);
         let (status, _) = latest_guidance(&rules, &tracker);
         assert!(status.contains("solve active"), "{status}");
-
-        // Ctrl+Alt+S hides and shows it.
-        assert_eq!(
-            apply_solve_hotkey(&mut tracker, SolveHotkey::Toggle, true),
-            Some("solve hidden")
-        );
-        assert_eq!(
-            apply_solve_hotkey(&mut tracker, SolveHotkey::Toggle, true),
-            Some("solve shown")
-        );
         assert!(tracker.guidance().show_solve);
     }
 
@@ -2459,7 +2511,7 @@ mod tests {
         let mut tracker = s_queue_pc_two();
         commit_board(&mut tracker, board_with(&setup.placements), 3);
         let complete = latest_setup_complete(&rules, &tracker, true);
-        apply_solve_hotkey(&mut tracker, SolveHotkey::Show, complete);
+        apply_solve_hotkey(&mut tracker, complete);
         assert!(tracker.guidance().show_solve);
 
         // The board empties: the PC is cleared and the next one starts OFF.
@@ -2488,7 +2540,7 @@ mod tests {
         let mut tracker = s_queue_pc_two();
         commit_board(&mut tracker, board_with(&setup.placements), 3);
         let complete = latest_setup_complete(&rules, &tracker, true);
-        apply_solve_hotkey(&mut tracker, SolveHotkey::Show, complete);
+        apply_solve_hotkey(&mut tracker, complete);
         let (status, _) = latest_guidance(&rules, &tracker);
         assert!(status.contains("solve active"), "{status}");
 
@@ -2994,7 +3046,7 @@ mod tests {
         let stale = tracker.snapshots().last().unwrap().clone();
         assert!(!mode.guide(&tracker, &stale).setup_complete);
         assert_eq!(
-            apply_solve_hotkey(&mut tracker, SolveHotkey::Show, false),
+            apply_solve_hotkey(&mut tracker, false),
             Some("solve hotkey ignored: setup not complete")
         );
 
@@ -3014,7 +3066,7 @@ mod tests {
         let guide = mode.guide(&tracker, &snapshot);
         assert!(guide.setup_complete, "{}", guide.status);
         assert_eq!(
-            apply_solve_hotkey(&mut tracker, SolveHotkey::Show, guide.setup_complete),
+            apply_solve_hotkey(&mut tracker, guide.setup_complete),
             Some("solve shown")
         );
         let guide = mode.guide(&tracker, &snapshot);
@@ -3102,6 +3154,105 @@ mod tests {
         assert!(mode.staged.is_none());
     }
 
+    /// LZ-ISO on a 4th PC: HOLD T, Current Z, NEXT ITSZJ have no perfect
+    /// clear; the piece after J is needed.
+    fn lz_iso_pc_four() -> (SessionTracker, pc_overlay_core::tracker::Snapshot) {
+        use Piece::*;
+        let tracker = tilj_pc_two();
+        let mut snapshot = tracker.snapshots().last().unwrap().clone();
+        snapshot.pc_ordinal = pc_overlay_core::PcOrdinal::new(4).unwrap();
+        let mut board = pc_overlay_core::empty_board();
+        for (x, y, piece) in [
+            (0, 0, S),
+            (1, 0, S),
+            (1, 1, S),
+            (2, 1, S),
+            (7, 0, O),
+            (8, 0, O),
+            (7, 1, O),
+            (8, 1, O),
+            (9, 0, I),
+            (9, 1, I),
+            (9, 2, I),
+            (9, 3, I),
+        ] {
+            board[y][x] = Some(piece);
+        }
+        snapshot.observation = pc_overlay_core::Observation {
+            board,
+            hold: Some(T),
+            current: Z,
+            next5: [I, T, S, Z, J],
+        };
+        (tracker, snapshot)
+    }
+
+    #[test]
+    fn ctrl_alt_s_turns_the_seed_queue_on_and_off() {
+        let mut use_seed = false;
+        assert_eq!(toggle_seed_queue(&mut use_seed), "seed queue ON");
+        assert!(use_seed);
+        assert_eq!(toggle_seed_queue(&mut use_seed), "seed queue OFF");
+        assert!(!use_seed);
+        // One piece after NEXT completes the 7 the LZ-ISO board needs, plus
+        // one for HOLD's choice.
+        let (_, snapshot) = lz_iso_pc_four();
+        assert_eq!(seed_lookahead(&snapshot.observation), 1);
+        let empty = pc_overlay_core::Observation {
+            board: pc_overlay_core::empty_board(),
+            ..snapshot.observation
+        };
+        assert_eq!(seed_lookahead(&empty), 4);
+        let no_hold = pc_overlay_core::Observation {
+            hold: None,
+            ..empty
+        };
+        assert_eq!(seed_lookahead(&no_hold), SEED_LOOKAHEAD_LIMIT);
+    }
+
+    #[test]
+    fn the_seed_queue_finds_a_perfect_clear_past_next_and_off_drops_it() {
+        let (tracker, snapshot) = lz_iso_pc_four();
+        let mut mode = KonbiniGuide::new(PathBuf::from("unused"));
+        mode.library = Some(konbini_library());
+
+        // OFF: only the next placement.
+        let guide = mode.guide(&tracker, &snapshot);
+        assert!(
+            guide
+                .status
+                .contains("no perfect clear with HOLD + NEXT yet"),
+            "{}",
+            guide.status
+        );
+        assert!(mode.solve.is_none());
+
+        // ON with a seed dealing L after J: perfect clears using it.
+        mode.later = vec![Piece::L];
+        let guide = mode.guide(&tracker, &snapshot);
+        assert!(
+            guide
+                .status
+                .contains("perfect clear(s) found (4 lines, seed queue); press S"),
+            "{}",
+            guide.status
+        );
+        assert!(mode.solve.is_some());
+
+        // The seed is dropped (OFF, or NEXT disagreed): the solves needing
+        // the unseen piece go, and the next placement is guided again.
+        mode.later = Vec::new();
+        let guide = mode.guide(&tracker, &snapshot);
+        assert!(mode.solve.is_none());
+        assert!(
+            guide
+                .status
+                .contains("no perfect clear with HOLD + NEXT yet"),
+            "{}",
+            guide.status
+        );
+    }
+
     #[test]
     fn a_built_konbini_setup_gets_searched_perfect_clears() {
         let mut mode = KonbiniGuide::new(PathBuf::from("unused"));
@@ -3122,7 +3273,7 @@ mod tests {
         assert!(count >= 1);
 
         // S shows the first solve: 24 cells over the 16 of the setup.
-        apply_solve_hotkey(&mut tracker, SolveHotkey::Show, guide.setup_complete);
+        apply_solve_hotkey(&mut tracker, guide.setup_complete);
         let guide = mode.guide(&tracker, &snapshot);
         assert!(
             guide

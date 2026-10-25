@@ -225,10 +225,21 @@ impl FoundSolve {
     /// Whether the board still follows this solve and its pieces left can be
     /// played with the HOLD, Current, and NEXT shown now.
     pub fn playable(&self, finder: &mut Finder, observation: &Observation) -> bool {
+        self.playable_after(finder, observation, &[])
+    }
+
+    /// As `playable`, with `later` known to follow NEXT (from the seed).
+    pub fn playable_after(
+        &self,
+        finder: &mut Finder,
+        observation: &Observation,
+        later: &[Piece],
+    ) -> bool {
         let Some(progress) = self.progress(&observation.board) else {
             return false;
         };
-        let queue = visible_queue(observation);
+        let mut queue = visible_queue(observation);
+        queue.extend_from_slice(later);
         let supply = Supply::Queue {
             hold: observation.hold,
             queue: &queue,
@@ -333,10 +344,23 @@ pub fn find_perfect_clears(
     observation: &Observation,
     limit: usize,
 ) -> Vec<FoundSolve> {
+    find_perfect_clears_after(finder, observation, &[], limit)
+}
+
+/// As `find_perfect_clears`, with `later` known to follow NEXT: the queue
+/// a confirmed seed gives (`seed::LiveSeed`), so a solve may use pieces not
+/// on screen yet.
+pub fn find_perfect_clears_after(
+    finder: &mut Finder,
+    observation: &Observation,
+    later: &[Piece],
+    limit: usize,
+) -> Vec<FoundSolve> {
     let Some(field) = board_field(&observation.board) else {
         return Vec::new();
     };
-    let queue = visible_queue(observation);
+    let mut queue = visible_queue(observation);
+    queue.extend_from_slice(later);
     let supply = Supply::Queue {
         hold: observation.hold,
         queue: &queue,
