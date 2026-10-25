@@ -240,19 +240,20 @@ impl LiveSeed {
             }
             return;
         }
-        if !from_start {
+        if let Some(candidates) = self.candidates.as_mut() {
+            // Only a run from the game start can be checked against a seed
+            // without knowing its place; a single seed is confirmed either
+            // way (a search can finish after a resync) and placed below.
+            if from_start {
+                candidates.retain(|seed| matches_seed(run, u64::from(*seed)));
+            }
+            if let [seed] = candidates[..] {
+                self.confirmed = Some(Confirmed::new(seed));
+                self.update(run, from_start);
+            }
             return;
         }
-        if let Some(candidates) = self.candidates.as_mut() {
-            candidates.retain(|seed| matches_seed(run, u64::from(*seed)));
-            if let [seed] = candidates[..] {
-                let mut confirmed = Confirmed::new(seed);
-                confirmed.run_end = confirmed
-                    .locate(run, true)
-                    .flatten()
-                    .map(|start| start + run.len());
-                self.confirmed = Some(confirmed);
-            }
+        if !from_start {
             return;
         }
         let due = self
@@ -454,6 +455,26 @@ mod tests {
         fresh.update(&pieces[100..130], false);
         assert!(!fresh.searching());
         assert_eq!(fresh.status(), "seed: game start not seen (retry with R)");
+    }
+
+    #[test]
+    fn a_search_that_finishes_after_a_resync_still_confirms_its_seed() {
+        let pieces = piece_sequence(i64::from(SEED), 200);
+        let mut live = LiveSeed::with_search(nearby);
+        live.update(&pieces[..21], true);
+        live.wait();
+        // Tracking restarted mid-game before the result was taken in.
+        live.update(&pieces[60..80], false);
+        assert_eq!(live.seed(), Some(SEED));
+        assert_eq!(live.later(2), pieces[80..82]);
+        // A run the seed does not deal anywhere discards it.
+        let mut wrong = LiveSeed::with_search(nearby);
+        wrong.candidates = Some(vec![SEED]);
+        let mut misread = pieces[60..80].to_vec();
+        misread.reverse();
+        wrong.update(&misread, false);
+        assert_eq!(wrong.seed(), None);
+        assert_eq!(wrong.status(), "seed discarded: NEXT disagreed");
     }
 
     #[test]

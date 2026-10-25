@@ -170,12 +170,16 @@ impl SessionTracker {
     /// with the game's first piece. The latest snapshot's NEXT5 ends the
     /// run. A restart (`CommitOutcome::NewGame`) starts a run at the game
     /// start; a resync or a confirmed discontinuity starts one mid-game.
+    /// A run that starts mid-game leaves out its first Current, which may
+    /// have come out of HOLD rather than the queue.
     pub fn spawn_run(&self) -> (&[Piece], bool) {
-        let start = self.queue_breaks.last().copied().unwrap_or(0);
-        (
-            &self.game_queue[start..],
-            self.queue_from_start && self.queue_breaks.is_empty(),
-        )
+        let from_start = self.queue_from_start && self.queue_breaks.is_empty();
+        let start = match self.queue_breaks.last() {
+            _ if from_start => 0,
+            Some(start) => start + 1,
+            None => 1,
+        };
+        (self.game_queue.get(start..).unwrap_or_default(), from_start)
     }
 
     fn reset_game_queue(&mut self, queue: Vec<Piece>, from_start: bool) {
@@ -493,7 +497,11 @@ impl SessionTracker {
         // Undo never crosses a restart, so the old game's states are gone.
         self.pc_ordinal = PcOrdinal::default();
         self.observed_queue_history = seed_queue(&observation);
-        self.reset_game_queue(seed_queue(&observation), true);
+        // HOLD pressed before the first stable state took the first piece,
+        // and a placed piece took its own: the queue no longer starts with
+        // the game.
+        let from_start = board_is_empty(&observation.board) && observation.hold.is_none();
+        self.reset_game_queue(seed_queue(&observation), from_start);
         self.guidance = GuidanceState::default();
         self.history.clear();
         let snapshot = self.push_snapshot(observation, recognition_confidence, timestamp_ms);
@@ -1127,7 +1135,8 @@ mod tests {
         // After a resync the queue no longer starts with the game.
         tracker.resync(PcOrdinal::default());
         tracker.commit(at(true, Some(T), L, [J, O, S, Z, T]), 1.0, 5);
-        assert_eq!(tracker.spawn_run(), (&[L, J, O, S, Z, T][..], false));
+        // Its first Current may have come out of HOLD, so only NEXT counts.
+        assert_eq!(tracker.spawn_run(), (&[J, O, S, Z, T][..], false));
     }
 
     #[test]
@@ -1186,10 +1195,13 @@ mod tests {
             [Piece::S, Piece::Z, Piece::I, Piece::O, Piece::L],
         );
         assert!(matches!(
-            tracker.commit(restarted, 1.0, 2),
+            tracker.commit(restarted.clone(), 1.0, 2),
             CommitOutcome::NewGame { .. }
         ));
         assert_eq!(tracker.pc_ordinal().get(), 1);
+        // HOLD took the first piece unseen: the queue is not the game's
+        // from its start, and the seed is not searched from it.
+        assert_eq!(tracker.spawn_run(), (&restarted.next5[..], false));
     }
 
     /// A tracker in PC 3 whose latest state has a HOLD, and a state that
@@ -1233,7 +1245,7 @@ mod tests {
         assert_eq!(tracker.pc_ordinal().get(), 3);
         assert_eq!(tracker.snapshots().len(), 1);
         assert_eq!(tracker.observed_queue_history().len(), 6);
-        assert_eq!(tracker.spawn_run(), (&seed_queue(&jump)[..], false));
+        assert_eq!(tracker.spawn_run(), (&jump.next5[..], false));
         // Later states continue from it.
         assert!(matches!(
             tracker.commit(
