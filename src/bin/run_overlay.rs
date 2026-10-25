@@ -2397,6 +2397,87 @@ mod tests {
         assert!(!tracker.guidance().show_solve);
     }
 
+    /// The board the game shows: full rows cleared and the rest dropped.
+    fn collapsed(board: Board) -> Board {
+        let mut shown = empty_board();
+        for (to, row) in shown
+            .iter_mut()
+            .zip(board.iter().filter(|row| !row.iter().all(Option::is_some)))
+        {
+            *to = *row;
+        }
+        shown
+    }
+
+    #[test]
+    fn a_solve_is_hidden_when_the_next_pc_opens_before_the_empty_board_is_stable() {
+        let rules = ijlo_rules();
+        let setup = rules.setup("ijlo_source_method", "ijlo_s_queue").unwrap();
+        let solve = &setup.solves[0];
+        let mut tracker = s_queue_pc_two();
+        commit_board(&mut tracker, board_with(&setup.placements), 3);
+        let complete = latest_setup_complete(&rules, &tracker, true);
+        apply_solve_hotkey(&mut tracker, SolveHotkey::Show, complete);
+        let (status, _) = latest_guidance(&rules, &tracker);
+        assert!(status.contains("solve active"), "{status}");
+
+        // All but the last solve piece, then the last one plus the next PC's
+        // first piece, with the empty board in between never stable. Each
+        // step discloses one NEXT piece per placement.
+        let last = solve.target.len() - 1;
+        let mut placed = setup.placements.clone();
+        placed.extend(solve.target[..last].iter().cloned());
+        let queue = [
+            Piece::O,
+            Piece::S,
+            Piece::Z,
+            Piece::T,
+            Piece::I,
+            Piece::J,
+            Piece::L,
+            Piece::S,
+            Piece::Z,
+            Piece::T,
+            Piece::O,
+            Piece::I,
+            Piece::J,
+            Piece::L,
+        ];
+        let window = |at: usize| -> [Piece; 5] { queue[at..at + 5].try_into().unwrap() };
+        // After the setup the NEXT is `window(0)`.
+        for at in [3, last] {
+            let mut state = observation(Some(Piece::J), Piece::L, window(at));
+            state.board = collapsed(board_with(&placed[..setup.placements.len() + at]));
+            let outcome = tracker.commit(state, 0.75, 10 + at as u64);
+            assert!(
+                matches!(outcome, CommitOutcome::Accepted { .. }),
+                "{outcome:?}"
+            );
+        }
+        assert_eq!(tracker.pc_ordinal().get(), 2);
+
+        let mut opened = observation(Some(Piece::J), Piece::L, window(last + 2));
+        opened.board = board_with(&[Placement {
+            piece: Piece::O,
+            cells: vec![
+                Cell { x: 0, y: 0 },
+                Cell { x: 1, y: 0 },
+                Cell { x: 0, y: 1 },
+                Cell { x: 1, y: 1 },
+            ],
+        }]);
+        let outcome = tracker.commit(opened, 0.75, 100);
+        assert!(
+            matches!(outcome, CommitOutcome::Accepted { .. }),
+            "{outcome:?}"
+        );
+        assert_eq!(tracker.pc_ordinal().get(), 3);
+        assert!(!tracker.guidance().show_solve);
+        let (status, cells) = latest_guidance(&rules, &tracker);
+        assert!(!status.contains("solve active"), "{status}");
+        assert!(cells.is_empty());
+    }
+
     /// Two 2nd-PC setups of the TILJ case, as the sheet's CSV has them.
     const KONBINI_SECOND: &str = "\"KNEWJADE\",\"ID2\",\"SOL\",\"CASES\",\"FUMEN\"\n\
         \"\",\"TILJ\",\"98.33%\",\"4956/5040\",\"v115@Ghg0DeglAewwBeg0Deglywh0DehlzhJeAgH\"\n\
