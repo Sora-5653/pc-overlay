@@ -142,6 +142,13 @@ Google ドキュメントから Markdown で書き出して取り込んだもの
   しても案内が消えない。`run-overlay` が解の残りのセルを描くのは、結果が
   `InProgress` でセットアップのミノが全て置かれているときだけで、`Ambiguous` /
   `Inconsistent` では何も描かない。
+- 1 つのセットアップの解は、続くバッグの順序ごとの別解で、多くは条件が `always` なので
+  盤面だけでは選べない。`run-overlay` は、今の HOLD・Current・NEXT と、NEXT の先に来る
+  バッグの残り（まだ見えていないミノ、順序は問わない）で SRS+・HOLD 1 枠で置ける解だけを
+  出す（`konbini::placements_playable`。Setup Konbini の `FoundSolve::playable` と同じ探索）。
+  2nd PC の解は 8 個から 7 個を使い 1 個を HOLD に残すので、見えている 7 個だけでは
+  足りないことがある。置ける解が 1 つもなければ状態行の詳細に
+  `no source solve with HOLD + NEXT` と出し、Setup Konbini の案内（解の探索）に切り替える。
 
 既定のオーバーレイは未確認のセットアップを `IJLO reference guidance ... (unreviewed)` と
 して描く。`--reviewed-only` を付けると出さないので、厳密モードでは S/Z キューの

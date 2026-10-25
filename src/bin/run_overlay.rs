@@ -10,8 +10,8 @@ use std::{
 
 use pc_overlay_core::{
     BoardCalibration, CommitOutcome, DiagramSet, FrameSize, GameKey, OverlayBoard, OverlayCell,
-    OverlayCellKind, OverlayState, OverlayWindow, PcOrdinal, Piece, RecognizerConfig, RuleSet,
-    SessionTracker, SolveProgress, SourceSections, StabilityConfig, StabilityFilter,
+    OverlayCellKind, OverlayState, OverlayWindow, PcOrdinal, Piece, Placement, RecognizerConfig,
+    RuleSet, SessionTracker, SolveProgress, SourceSections, StabilityConfig, StabilityFilter,
     TetrioRecognizer, TrackerConfig, WindowInfo, WindowLocator, board_is_empty,
     finder::{Buildable, Finder},
     konbini,
@@ -575,7 +575,13 @@ fn unified_guidance(
         if prefer_konbini {
             note = Some("source rules skipped (Ctrl+Alt+K)".to_string());
         } else {
-            match guidance_stage(library, tracker, snapshot, reviewed_only) {
+            match guidance_stage(
+                library,
+                &mut konbini.finder,
+                tracker,
+                snapshot,
+                reviewed_only,
+            ) {
                 GuidanceStage::Inactive(message) => {
                     note = Some(message.replacen("PC Overlay: ", "source: ", 1));
                 }
@@ -1619,7 +1625,13 @@ enum GuidanceStage<'a> {
 fn latest_setup_complete(library: &Library, tracker: &SessionTracker, reviewed_only: bool) -> bool {
     tracker.snapshots().last().is_some_and(|snapshot| {
         matches!(
-            guidance_stage(library, tracker, snapshot, reviewed_only),
+            guidance_stage(
+                library,
+                &mut Finder::new(),
+                tracker,
+                snapshot,
+                reviewed_only
+            ),
             GuidanceStage::SetupComplete { .. }
         )
     })
@@ -1633,7 +1645,13 @@ fn guidance_for_snapshot(
     snapshot: &pc_overlay_core::tracker::Snapshot,
     reviewed_only: bool,
 ) -> (String, Vec<OverlayCell>) {
-    let stage = guidance_stage(library, tracker, snapshot, reviewed_only);
+    let stage = guidance_stage(
+        library,
+        &mut Finder::new(),
+        tracker,
+        snapshot,
+        reviewed_only,
+    );
     render_stage(library, tracker, snapshot, stage)
 }
 
@@ -1700,6 +1718,7 @@ fn render_stage(
 
 fn guidance_stage<'a>(
     library: &'a Library,
+    finder: &mut Finder,
     tracker: &SessionTracker,
     snapshot: &pc_overlay_core::tracker::Snapshot,
     reviewed_only: bool,
@@ -1755,7 +1774,14 @@ fn guidance_stage<'a>(
     } else {
         tracker.guidance().solve_index % candidates.len()
     };
-    candidates
+    // A setup's solves are alternatives for different queues (most have the
+    // condition `always`), so the board alone does not pick one: only a solve
+    // the HOLD, Current, and NEXT shown now can finish is offered. A solve
+    // takes the following bag, whose pieces past NEXT are the ones it has not
+    // shown yet (a 2nd-PC solve keeps one of its 8 pieces in HOLD).
+    let later = bag_rest(&context.queue_history);
+    let mut followed = false;
+    let stage = candidates
         .iter()
         .cycle()
         .skip(rotation)
@@ -1767,15 +1793,48 @@ fn guidance_stage<'a>(
                     setup_complete: true,
                     progress,
                     ..
-                } => Some(GuidanceStage::SetupComplete {
-                    setup,
-                    solve,
-                    progress,
-                }),
+                } => {
+                    followed = true;
+                    let drawing: Vec<Placement> = setup
+                        .placements
+                        .iter()
+                        .chain(&solve.target)
+                        .cloned()
+                        .collect();
+                    konbini::placements_playable(finder, &drawing, &snapshot.observation, &later)
+                        .then_some(GuidanceStage::SetupComplete {
+                            setup,
+                            solve,
+                            progress,
+                        })
+                }
                 _ => None,
             }
-        })
-        .unwrap_or(GuidanceStage::Setup { setup })
+        });
+    match stage {
+        Some(stage) => stage,
+        None if followed => GuidanceStage::Inactive(format!(
+            "PC Overlay: {case} setup complete ({}); no source solve with HOLD + NEXT",
+            setup.id
+        )),
+        None => GuidanceStage::Setup { setup },
+    }
+}
+
+/// The pieces of a 7-bag not among `bag` (its pieces shown so far); empty
+/// when the bag is complete or does not follow the 7-bag.
+fn bag_rest(bag: &[Piece]) -> Vec<Piece> {
+    let duplicates = bag
+        .iter()
+        .enumerate()
+        .any(|(at, piece)| bag[..at].contains(piece));
+    if duplicates {
+        return Vec::new();
+    }
+    pc_overlay_core::finder::ALL_PIECES
+        .into_iter()
+        .filter(|piece| !bag.contains(piece))
+        .collect()
 }
 
 fn plan_cells(plan: pc_overlay_core::OverlayPlan, current: Piece) -> Vec<OverlayCell> {
@@ -1908,7 +1967,7 @@ fn load_calibration(path: &Path) -> Result<BoardCalibration, Box<dyn Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pc_overlay_core::{Board, Cell, Observation, Placement, empty_board};
+    use pc_overlay_core::{Board, Cell, Observation, empty_board};
     use std::collections::BTreeSet;
 
     fn observation(hold: Option<Piece>, current: Piece, next5: [Piece; 5]) -> Observation {
@@ -2231,11 +2290,12 @@ mod tests {
                 .all(|cell| cell.piece == Some(Piece::L))
         );
 
-        // A placed solve piece disappears from the overlay. Pick one that
+        // A placed solve piece disappears from the overlay: Current L, which
         // completes no row, so the uncollapsed board is what the game shows.
         let placed = solve
             .target
             .iter()
+            .filter(|piece| piece.piece == Piece::L)
             .map(|piece| {
                 let mut placed = setup.placements.clone();
                 placed.push(piece.clone());
@@ -2254,10 +2314,21 @@ mod tests {
                     }
                 )
             })
-            .expect("some solve piece completes no row on its own");
-        commit_board(&mut tracker, board_with(&placed), 5);
-        let (_, cells) = latest_guidance(&rules, &tracker);
-        assert_eq!(cells.len(), solve_cells.len() - 4);
+            .expect("the solve's L completes no row on its own");
+        // The queue moves on, so the rest can still be played.
+        let mut next = observation(
+            Some(Piece::J),
+            Piece::O,
+            [Piece::S, Piece::Z, Piece::T, Piece::I, Piece::L],
+        );
+        next.board = board_with(&placed);
+        let outcome = tracker.commit(next, 0.75, 5);
+        assert!(
+            matches!(outcome, CommitOutcome::Accepted { .. }),
+            "{outcome:?}"
+        );
+        let (status, cells) = latest_guidance(&rules, &tracker);
+        assert_eq!(cells.len(), solve_cells.len() - 4, "{status}");
     }
 
     #[test]
@@ -3062,6 +3133,90 @@ mod tests {
         }
         // The 6 pieces shown miss some orders; those wait for the 7th.
         assert!(without > 0);
+    }
+
+    /// The 2nd PC's ILOZ case (Current I, NEXT LOZTJ) built as the mirrored
+    /// `iloz_image15_m` (I, L, O with Z saved), then HOLD Z swapped for T:
+    /// HOLD T, Current Z, NEXT JLISZ, as reported from a live game.
+    fn iloz_image15_m_built() -> (Library, SessionTracker) {
+        let library = Library::load(ijlo_only(), &root().join("data/cases")).unwrap();
+        let mut tracker = tracker_at_pc_start(
+            2,
+            Piece::I,
+            [Piece::L, Piece::O, Piece::Z, Piece::T, Piece::J],
+        );
+        let placements = library
+            .setup("iloz_main_46", "iloz_image15_m")
+            .unwrap()
+            .placements
+            .clone();
+        use Piece::*;
+        let states = [
+            (1, None, L, [O, Z, T, J, L]),
+            (2, None, O, [Z, T, J, L, I]),
+            (3, None, Z, [T, J, L, I, S]),
+            (3, Some(Z), T, [J, L, I, S, Z]),
+            (3, Some(T), Z, [J, L, I, S, Z]),
+        ];
+        for (timestamp, (placed, hold, current, next5)) in (3..).zip(states) {
+            let mut next = observation(hold, current, next5);
+            next.board = board_with(&placements[..placed]);
+            tracker.commit(next, 0.75, timestamp);
+        }
+        (library, tracker)
+    }
+
+    #[test]
+    fn a_source_solve_the_shown_pieces_cannot_play_is_skipped() {
+        let (library, mut tracker) = iloz_image15_m_built();
+        assert!(tracker.toggle_show_solve());
+        // The setup's 12 solves are alternatives, all with the condition
+        // `always`. `image15_m_solve_1`, shown before as the first, takes
+        // I, L, J, O, Z, Z, T: no order of HOLD T and Z, J, L, I, S, Z, O
+        // (the O is the bag's last piece, past NEXT) plays it with SRS+.
+        // Only two solves can be played, and cycling (Ctrl+Alt+N) stays on
+        // them.
+        let setup = library.setup("iloz_main_46", "iloz_image15_m").unwrap();
+        let mut shown = BTreeSet::new();
+        for index in 0..setup.solves.len() {
+            let mut guidance = tracker.guidance().clone();
+            guidance.solve_index = index;
+            tracker.set_guidance(guidance);
+            let snapshot = tracker.snapshots().last().unwrap();
+            let (status, _) = guidance_for_snapshot(&library, &tracker, snapshot, true);
+            let id = status
+                .split("solve active (")
+                .nth(1)
+                .and_then(|rest| rest.split([' ', ')']).next())
+                .unwrap_or_else(|| panic!("{status}"));
+            shown.insert(id.to_string());
+        }
+        assert_eq!(
+            shown,
+            BTreeSet::from([
+                "image15_m_solve_12".to_string(),
+                "image15_m_solve_8".to_string()
+            ])
+        );
+    }
+
+    #[test]
+    fn a_source_setup_without_a_playable_solve_falls_back_to_konbini() {
+        let (library, tracker) = iloz_image15_m_built();
+        let mut snapshot = tracker.snapshots().last().unwrap().clone();
+        // No solve of the setup takes three O.
+        snapshot.observation.next5 = [Piece::O, Piece::O, Piece::O, Piece::S, Piece::Z];
+        let mut mode = konbini_guide();
+        let guide = unified_guidance(&library, &mut mode, &tracker, &snapshot, true, false);
+        assert_ne!(guide.origin, Origin::Source, "{}", guide.status);
+        assert!(
+            guide
+                .note
+                .as_deref()
+                .is_some_and(|note| note.contains("no source solve with HOLD + NEXT")),
+            "{:?}",
+            guide.note
+        );
     }
 
     #[test]
