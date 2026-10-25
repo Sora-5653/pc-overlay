@@ -242,6 +242,9 @@ pub struct Target {
     /// Per piece (in `ALL_PIECES` order), the cells that piece must cover.
     pub coloured: [Mask; 7],
     pub any: Mask,
+    /// Cells on the board before any piece of the drawing, such as the half
+    /// of an O left by a line clear: not whole pieces.
+    pub base: Mask,
 }
 
 impl Target {
@@ -250,6 +253,7 @@ impl Target {
             cells: 0,
             coloured: [0; 7],
             any: 0,
+            base: 0,
         };
         for (x, y, piece) in cells {
             if usize::from(y) >= FIELD_ROWS || x >= 10 {
@@ -384,7 +388,10 @@ impl Target {
                 .iter()
                 .filter(|row| !cleared.contains(row))
                 .all(|row| placed & row_mask(*row) != row_mask(*row));
-            if consistent && placed.count_ones().is_multiple_of(4) && self.field(placed) == field {
+            if consistent
+                && (placed & !self.base).count_ones().is_multiple_of(4)
+                && self.field(placed) == field
+            {
                 return Some(placed);
             }
         }
@@ -782,6 +789,7 @@ impl Target {
                 cells,
                 coloured: [0; 7],
                 any: cells,
+                base: 0,
             }
         })
     }
