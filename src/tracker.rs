@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     condition::EvalContext,
-    model::{Observation, PcOrdinal, Piece, board_is_empty},
+    model::{Board, Observation, PcOrdinal, Piece, board_is_empty},
 };
 
 /// How long a state whose NEXT does not continue the tracked history must
@@ -407,9 +407,40 @@ impl SessionTracker {
                     timestamp_ms,
                 );
             };
+            // Each placement discloses one piece; the game's first HOLD
+            // discloses one without a placement.
+            let first_hold = last.observation.hold.is_none() && observation.hold.is_some();
+            let placed = (updated.len() - self.observed_queue_history.len())
+                .saturating_sub(usize::from(first_hold));
+            let unseen_pc = crosses_unseen_pc(&last.observation.board, &observation.board, placed);
+            // The pieces of the old PC: those up to the last state, plus the
+            // ones that finished it (all placed but the new PC's cells).
+            let finished_pc = unseen_pc
+                .then(|| {
+                    let new_cells = occupied_cells(&observation.board);
+                    let finishing = placed
+                        .checked_sub(new_cells / 4)
+                        .filter(|_| new_cells.is_multiple_of(4))?;
+                    let before =
+                        self.placed_since_pc_start(last.queue_end, last.observation.hold)?;
+                    Some(before + finishing)
+                })
+                .map(Option::unwrap_or_default);
             self.game_queue
                 .extend_from_slice(&updated[self.observed_queue_history.len()..]);
-            self.observed_queue_history = updated;
+            match finished_pc {
+                // A PC whose empty board never became stable, because the
+                // next piece was placed within the frames the stability
+                // filter needs. Without this the new PC continued the old
+                // one: its solve stayed shown and the PIECES counter agreed
+                // with the count that missed the PC, so nothing corrected it.
+                Some(placed) => {
+                    self.pc_ordinal = self.pc_ordinal.after_pieces(placed);
+                    self.observed_queue_history = seed_queue(&observation);
+                    self.guidance = GuidanceState::default();
+                }
+                None => self.observed_queue_history = updated,
+            }
         } else {
             self.observed_queue_history = seed_queue(&observation);
             self.game_queue = seed_queue(&observation);
@@ -601,6 +632,28 @@ fn starts_new_game(previous: &Observation, observation: &Observation) -> bool {
     let continues = overlap(&previous.next5, &observation.next5).is_some();
     (observation.hold.is_none() && previous.hold.is_some())
         || (previous.hold.is_none() && !continues)
+}
+
+fn occupied_cells(board: &Board) -> usize {
+    board.iter().flatten().filter(|cell| cell.is_some()).count()
+}
+
+/// Whether `placed` placements took `before` to `after` through an empty
+/// board, both being non-empty. Every placement adds 4 cells and every line
+/// clear removes 10, so the cells give the number of lines cleared; when it
+/// reaches the rows `before` filled, all of them cleared, which is a PC.
+/// Misread cells that break the count are not taken for one.
+fn crosses_unseen_pc(before: &Board, after: &Board, placed: usize) -> bool {
+    let rows = before
+        .iter()
+        .filter(|row| row.iter().any(Option::is_some))
+        .count();
+    if rows == 0 || board_is_empty(after) {
+        return false;
+    }
+    (occupied_cells(before) + 4 * placed)
+        .checked_sub(occupied_cells(after))
+        .is_some_and(|cleared| cleared.is_multiple_of(10) && cleared / 10 >= rows)
 }
 
 fn seed_queue(observation: &Observation) -> Vec<Piece> {
@@ -801,6 +854,86 @@ mod tests {
         let outcome = tracker.commit(filled, 1.0, 3);
         assert!(matches!(outcome, CommitOutcome::RolledBack { .. }));
         assert_eq!(tracker.pc_ordinal().get(), 1);
+    }
+
+    /// `rows` full rows but for the last `gap` cells of the top one.
+    fn stack(rows: usize, gap: usize) -> Board {
+        let mut board = empty_board();
+        for (y, row) in board.iter_mut().take(rows).enumerate() {
+            for (x, cell) in row.iter_mut().enumerate() {
+                if y + 1 < rows || x < 10 - gap {
+                    *cell = Some(Piece::T);
+                }
+            }
+        }
+        board
+    }
+
+    #[test]
+    fn a_pc_whose_empty_board_was_not_seen_still_starts_the_next_pc() {
+        let mut tracker = tracker();
+        let next = |current, next5| Observation {
+            board: empty_board(),
+            hold: Some(Piece::I),
+            current,
+            next5,
+        };
+        tracker.commit(
+            next(Piece::J, [Piece::L, Piece::O, Piece::S, Piece::Z, Piece::T]),
+            1.0,
+            1,
+        );
+        // Two rows with an I's gap: the PC needs one more piece.
+        let mut last = next(Piece::L, [Piece::O, Piece::S, Piece::Z, Piece::T, Piece::I]);
+        last.board = stack(2, 4);
+        tracker.commit(last, 1.0, 2);
+        tracker.toggle_show_solve();
+        assert_eq!(tracker.pc_ordinal().get(), 1);
+
+        // The I clears both rows and an O opens the next PC before the
+        // empty board is ever stable.
+        let mut opened = next(Piece::S, [Piece::Z, Piece::T, Piece::I, Piece::J, Piece::L]);
+        opened.board[0][0] = Some(Piece::O);
+        opened.board[0][1] = Some(Piece::O);
+        opened.board[1][0] = Some(Piece::O);
+        opened.board[1][1] = Some(Piece::O);
+        let outcome = tracker.commit(opened, 1.0, 3);
+        assert!(
+            matches!(outcome, CommitOutcome::Accepted { .. }),
+            "{outcome:?}"
+        );
+        assert_eq!(tracker.pc_ordinal().get(), 2);
+        assert!(!tracker.guidance().show_solve);
+        assert_eq!(
+            tracker.observed_queue_history(),
+            [Piece::S, Piece::Z, Piece::T, Piece::I, Piece::J, Piece::L]
+        );
+    }
+
+    #[test]
+    fn a_line_clear_within_a_pc_is_not_taken_for_one() {
+        let mut tracker = tracker();
+        let mut before = observation(
+            true,
+            Piece::J,
+            [Piece::L, Piece::O, Piece::S, Piece::Z, Piece::T],
+        );
+        before.board = stack(1, 4);
+        for cell in &mut before.board[1][..4] {
+            *cell = Some(Piece::L);
+        }
+        tracker.commit(before.clone(), 1.0, 1);
+        // An I fills the bottom row: one line of two clears.
+        let mut after = observation(
+            true,
+            Piece::L,
+            [Piece::O, Piece::S, Piece::Z, Piece::T, Piece::I],
+        );
+        after.board = empty_board();
+        after.board[0] = before.board[1];
+        tracker.commit(after, 1.0, 2);
+        assert_eq!(tracker.pc_ordinal().get(), 1);
+        assert_eq!(tracker.observed_queue_history().len(), 7);
     }
 
     #[test]
