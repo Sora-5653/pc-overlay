@@ -1317,16 +1317,17 @@ fn konbini_render(
     *index = position as isize;
     let candidate = &candidates[position];
     let setup = &library.setups[candidate.setup];
-    // The rate for the state on screen; the sheet's when they differ, as the
-    // sheet assumes the pieces its ID names.
-    let rate = candidate.rate.flatten();
-    let sol = match (rate, setup.sol_percent) {
-        (Some(rate), Some(sol)) if (rate - sol).abs() < 0.005 => format!(" {rate:.2}%"),
-        (Some(rate), Some(sol)) => format!(" {rate:.2}% here (sheet {sol:.2}%)"),
-        (Some(rate), None) => format!(" {rate:.2}% here"),
-        (None, Some(sol)) if candidate.rate.is_none() => format!(" sheet {sol:.2}%, rating"),
-        (None, Some(sol)) => format!(" sheet {sol:.2}%"),
-        (None, None) => String::new(),
+    // The sheet's rate as it is, from its count when the percentage cell is
+    // empty; the rate for the state on screen only orders the candidates.
+    let rate = setup.sol_percent.or_else(|| {
+        setup
+            .sol_cases
+            .map(|(cleared, total)| 100.0 * cleared as f32 / total as f32)
+    });
+    let sol = match (rate, setup.sol_cases) {
+        (Some(sol), Some((cleared, total))) => format!(" {sol:.2}% ({cleared}/{total})"),
+        (Some(sol), None) => format!(" {sol:.2}%"),
+        (None, _) => String::new(),
     };
     let source = if setup.source.is_empty() {
         String::new()
@@ -2584,7 +2585,7 @@ mod tests {
         let mut index = 0;
         let (status, cells) = konbini_guidance(&library, &tracker, snapshot, &mut index);
         assert!(
-            status.contains("[Konbini 2nd]: TILJ 100.00% [KNEWJADE] (1/2)"),
+            status.contains("[Konbini 2nd]: TILJ 100.00% (5040/5040) [KNEWJADE] (1/2)"),
             "{status}"
         );
         assert_eq!(cells.len(), 16);
@@ -2598,7 +2599,10 @@ mod tests {
         // Previous from the first wraps to the last.
         let mut index = -1;
         let (status, _) = konbini_guidance(&library, &tracker, snapshot, &mut index);
-        assert!(status.contains("98.33% [KNEWJADE] (2/2)"), "{status}");
+        assert!(
+            status.contains("98.33% (4956/5040) [KNEWJADE] (2/2)"),
+            "{status}"
+        );
         assert_eq!(index, 1);
     }
 
@@ -2614,9 +2618,11 @@ mod tests {
     }
 
     #[test]
-    fn konbini_rates_a_setup_for_the_pieces_on_screen() {
+    fn konbini_shows_the_sheet_rate_whatever_the_pieces_on_screen() {
         use Piece::*;
         // TILZ built from I, L, Z: the sheet's 100% keeps the T for the PC.
+        // With O in HOLD only 1 in 4 orders of the bag's rest leave one, but
+        // the sheet's rate is what is shown.
         let mut library = KonbiniLibrary::default();
         library.add_stage_csv(
             2,
@@ -2627,17 +2633,19 @@ mod tests {
         let named = pc_two_with_hold(T, I, [L, Z, J, O, S]);
         let snapshot = named.snapshots().last().unwrap();
         let (status, _) = konbini_guidance(&library, &named, snapshot, &mut 0);
-        assert!(status.contains("TILZ 100.00% [KNEWJADE]"), "{status}");
+        assert!(
+            status.contains("TILZ 100.00% (5040/5040) [KNEWJADE]"),
+            "{status}"
+        );
 
-        // O instead of T: O stays in HOLD, and only 1 in 4 orders of the
-        // bag's rest leave a perfect clear.
         let other = pc_two_with_hold(O, I, [L, Z, J, O, S]);
         let snapshot = other.snapshots().last().unwrap();
         let (status, _) = konbini_guidance(&library, &other, snapshot, &mut 0);
         assert!(
-            status.contains("TILZ 25.00% here (sheet 100.00%) [KNEWJADE]"),
+            status.contains("TILZ 100.00% (5040/5040) [KNEWJADE]"),
             "{status}"
         );
+        assert!(!status.contains("here"), "{status}");
     }
 
     #[test]
@@ -2856,7 +2864,7 @@ mod tests {
         assert!(
             guide
                 .status
-                .contains("[Konbini 2nd]: TILJ 100.00% [KNEWJADE] (1/2)"),
+                .contains("[Konbini 2nd]: TILJ 100.00% (5040/5040) [KNEWJADE] (1/2)"),
             "{}",
             guide.status
         );
