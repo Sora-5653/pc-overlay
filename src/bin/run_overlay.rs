@@ -951,6 +951,13 @@ impl KonbiniGuide {
         let shortlist = &*shortlist;
         let observation = &snapshot.observation;
         let show = tracker.guidance().show_solve;
+        // Solves searched without the seed's pieces stay playable once the
+        // seed queue gives pieces after NEXT, but miss the ones those pieces
+        // open up: search again with them.
+        if self.solve.as_ref().is_some_and(|session| !session.seeded) && !self.later.is_empty() {
+            self.solve = None;
+            self.searched = None;
+        }
         // Keep only the solves the pieces shown now can still finish: the
         // player may have used HOLD or an order the solve does not allow.
         if let Some(session) = self.solve.as_mut()
@@ -3251,6 +3258,32 @@ mod tests {
             "{}",
             guide.status
         );
+    }
+
+    #[test]
+    fn the_seed_queue_searches_again_when_solves_were_found_without_it() {
+        let mut mode = KonbiniGuide::new(PathBuf::from("unused"));
+        mode.library = Some(konbini_library());
+        let queue = [Piece::S, Piece::Z, Piece::I, Piece::T, Piece::L];
+        let tracker = tilj_setup_built(Some(Piece::J), Piece::O, queue);
+        let snapshot = tracker.snapshots().last().unwrap().clone();
+        mode.guide(&tracker, &snapshot);
+        let found = mode
+            .solve
+            .as_ref()
+            .expect("solves with HOLD + NEXT")
+            .solves
+            .len();
+
+        // The seed comes in (Ctrl+Alt+S, or its estimate completes): the
+        // solves found without it are still playable, which used to keep
+        // them and skip the search the seed's pieces widen.
+        mode.later = vec![Piece::O];
+        let guide = mode.guide(&tracker, &snapshot);
+        assert!(guide.status.contains("seed queue"), "{}", guide.status);
+        let session = mode.solve.as_ref().expect("searched again");
+        assert!(session.seeded);
+        assert!(session.solves.len() >= found);
     }
 
     #[test]

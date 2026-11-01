@@ -128,6 +128,10 @@ pub struct SessionTracker {
     queue_breaks: Vec<usize>,
     /// Whether `game_queue` starts at the game start: the first piece dealt.
     queue_from_start: bool,
+    /// Set by a manual resync until the next game start: the history it
+    /// cleared does not make the next state the game start, even on an
+    /// empty board without HOLD (a PC played without HOLD).
+    resynced: bool,
     guidance: GuidanceState,
     history: Vec<Snapshot>,
     /// The last state rejected as a discontinuity and when it was first
@@ -146,6 +150,7 @@ impl SessionTracker {
             game_queue: Vec::new(),
             queue_breaks: Vec::new(),
             queue_from_start: false,
+            resynced: false,
             guidance: GuidanceState::default(),
             history: Vec::new(),
             unconfirmed: None,
@@ -267,6 +272,7 @@ impl SessionTracker {
         self.pc_ordinal = ordinal;
         self.observed_queue_history.clear();
         self.reset_game_queue(Vec::new(), false);
+        self.resynced = true;
         self.guidance = GuidanceState::default();
         self.history.clear();
         self.unconfirmed = None;
@@ -478,8 +484,10 @@ impl SessionTracker {
         } else {
             // An empty board and HOLD: the game start, as far as the screen
             // tells (a PC without any HOLD is rare, and a wrong guess is
-            // caught by the seed disagreeing with NEXT).
-            let from_start = board_is_empty(&observation.board) && observation.hold.is_none();
+            // caught by the seed disagreeing with NEXT). Not after a resync:
+            // the player resyncs mid-game.
+            let from_start =
+                !self.resynced && board_is_empty(&observation.board) && observation.hold.is_none();
             self.observed_queue_history = seed_queue(&observation);
             self.reset_game_queue(seed_queue(&observation), from_start);
         }
@@ -496,6 +504,7 @@ impl SessionTracker {
     ) -> CommitOutcome {
         // Undo never crosses a restart, so the old game's states are gone.
         self.pc_ordinal = PcOrdinal::default();
+        self.resynced = false;
         self.observed_queue_history = seed_queue(&observation);
         // HOLD pressed before the first stable state took the first piece,
         // and a placed piece took its own: the queue no longer starts with
@@ -1137,6 +1146,29 @@ mod tests {
         tracker.commit(at(true, Some(T), L, [J, O, S, Z, T]), 1.0, 5);
         // Its first Current may have come out of HOLD, so only NEXT counts.
         assert_eq!(tracker.spawn_run(), (&[J, O, S, Z, T][..], false));
+    }
+
+    #[test]
+    fn a_resync_on_an_empty_board_without_hold_is_not_the_game_start() {
+        use Piece::*;
+        let mut tracker = tracker();
+        let empty = |current, next5| Observation {
+            hold: None,
+            ..observation(false, current, next5)
+        };
+        // Ctrl+Alt+1..7 right after a PC played without HOLD: the queue is
+        // mid-game, and taking it for the game start made the seed disagree
+        // and dropped the right one for the rest of the game.
+        tracker.resync(PcOrdinal::new(2).unwrap());
+        tracker.commit(empty(T, [I, L, J, O, S]), 1.0, 1);
+        assert_eq!(tracker.spawn_run(), (&[I, L, J, O, S][..], false));
+        // A restart is the game start again.
+        tracker.commit(observation(true, I, [L, J, O, S, Z]), 1.0, 2);
+        assert!(matches!(
+            tracker.commit(empty(Z, [S, T, I, O, L]), 1.0, 3),
+            CommitOutcome::NewGame { .. }
+        ));
+        assert_eq!(tracker.spawn_run(), (&[Z, S, T, I, O, L][..], true));
     }
 
     #[test]
