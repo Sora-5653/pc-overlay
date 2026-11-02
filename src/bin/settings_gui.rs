@@ -24,7 +24,7 @@ use pc_overlay_core::{
 const HOTKEYS: &str = "\
 Hotkeys while the overlay runs:
 S  -  show the solve once the setup is complete
-Ctrl+Alt+S  -  show / hide the solve
+Ctrl+Alt+S  -  seed queue ON / OFF: also search with the pieces after NEXT, from the seed estimated from the pieces seen
 Ctrl+Alt+N / B  -  next / previous setup (or solve, once found)
 Ctrl+Alt+K  -  2nd PC: use Setup Konbini instead of the source rules
 Ctrl+Alt+F  -  download the Setup Konbini sheets again
