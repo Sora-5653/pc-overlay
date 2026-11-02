@@ -67,22 +67,36 @@ TETR.IO で **パーフェクトクリア（PC）を続けて取る練習** を�
 - **TETR.IO Desktop**（ブラウザ版には対応していません）
 - ZEN モード、NEXT 5 個表示、ゴースト表示あり
 
+## 入手
+
+[Releases](https://github.com/Sora-5653/pc-overlay/releases/latest) から
+`pc-overlay-<版>-windows-x64.zip` をダウンロードし、好きな場所に展開します。
+展開したフォルダには、実行ファイルと、それが読む `data` フォルダが入っています。
+exe はフォルダから動かさずに実行してください。
+
+署名していない実行ファイルなので、初回は Windows SmartScreen の警告が出ることが
+あります。その場合は「詳細情報」から「実行」を選びます。
+
 ## 使い方
 
 1. TETR.IO Desktop を起動し、ZEN モードを開きます。
-2. 設定ウィンドウ（`pc-overlay-gui.exe`）を起動します。
+2. 展開したフォルダの設定ウィンドウ（`pc-overlay-gui.exe`）を起動します。
 3. 初回と、TETR.IO の表示の大きさを変えたときは **Calibrate board** を押し、
    盤面の左上から右下までドラッグして Enter を押します。
-4. **Start overlay** を押すと、TETR.IO の上にお手本が出るようになります。
+4. Setup Konbini の形を使うときは、初回に **Download Setup Konbini** を押して
+   データを取得します。
+5. **Start overlay** を押すと、TETR.IO の上にお手本が出るようになります。
 
-いまは配布用の実行ファイルを用意していないので、手元で組み立てる必要があります。
-Rust を入れたうえで、このフォルダで次を実行してください。
+### ソースから組み立てる
+
+Rust を入れたうえで、このフォルダで次を実行します。
 
 ```powershell
 cargo build --release
 ```
 
-組み立てた `target\release\pc-overlay-gui.exe` を、このフォルダから実行します。
+組み立てた `target\release\pc-overlay-gui.exe` を、このフォルダから実行します
+（`data` フォルダを、起動したときのフォルダから読むためです）。
 
 ## キー操作（オーバーレイの表示中）
 
