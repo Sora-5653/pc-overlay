@@ -1,0 +1,32 @@
+name: 不具合の報告
+description: 表示がおかしい、読み取りを間違える、落ちるなどの問題
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: 起きたこと
+      description: 何が起き、本来はどうなるべきだったか
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 再現の手順
+      description: 何回目の PC か、HOLD と NEXT の並び、押したキーなど
+      placeholder: |
+        1. ZEN モードで 2nd PC の最初、HOLD なし、NEXT が IJLOS T
+        2. ...
+    validations:
+      required: true
+  - type: textarea
+    id: screenshot
+    attributes:
+      label: スクリーンショット
+      description: 盤面とオーバーレイが写ったもの（ドラッグ＆ドロップで貼れます）
+  - type: input
+    id: environment
+    attributes:
+      label: 環境
+      description: Windows のバージョン、TETR.IO の表示の大きさ、使ったコミット
+      placeholder: Windows 11、1920x1080、main の 1a2b3c4

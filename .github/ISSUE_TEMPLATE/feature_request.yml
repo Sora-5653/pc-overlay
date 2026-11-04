@@ -1,0 +1,22 @@
+name: 改善の提案
+description: 新しい機能や、使い勝手の改善の案
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: 困っていること
+      description: 今のどの場面で、何が不便か
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 案
+      description: どう変わるとよいか
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 他に考えた方法
