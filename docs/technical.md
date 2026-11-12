@@ -636,10 +636,17 @@ NEXT はそのうち 6 個しか見せない。`cargo run --release --example ko
 
 ```powershell
 cargo build --release
-.\target\release\pc-overlay-gui.exe      # リポジトリのフォルダから実行する
+.\target\release\pc-overlay-gui.exe
 ```
 
 4 つのボタンと状態の文章を持つ小さなウィンドウで、1 秒ごとに更新する。
+
+読む `data/` のフォルダ（`find_root`）: 起動したフォルダに `data/ijlo.json` があればそこ、
+なければ exe のフォルダから上へたどって最初に `data/ijlo.json` があるフォルダ、どこにも
+なければ起動したフォルダ。`target\release` の exe をダブルクリックしてもリポジトリの
+`data/` を使う。`run-overlay` と `configure-overlay` はそのフォルダを作業フォルダにして
+起動する（以前は起動したフォルダを引き継ぎ、`data/` がないとオーバーレイがすぐ終了した）。
+状態の文章に `Data folder:` として出す。
 
 - **Start overlay / Stop overlay**: ウィンドウと同じフォルダの `run-overlay.exe` を
   起動する（停止はプロセスを終了させる。オーバーレイには Ctrl+C の他に終わる手段がない）。
