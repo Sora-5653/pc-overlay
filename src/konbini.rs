@@ -69,6 +69,9 @@ pub struct KonbiniSetup {
     pub id: String,
     /// The sheet's `SOL` column, in percent.
     pub sol_percent: Option<f32>,
+    /// The column after `SOL` (`CASES`, e.g. `4956/5040`): the orders that
+    /// leave a perfect clear and the orders counted.
+    pub sol_cases: Option<(u32, u32)>,
     pub fumen: String,
     pub cells: Vec<FumenCell>,
     pub target: Target,
@@ -231,10 +234,21 @@ impl FoundSolve {
     /// Whether the board still follows this solve and its pieces left can be
     /// played with the HOLD, Current, and NEXT shown now.
     pub fn playable(&self, finder: &mut Finder, observation: &Observation) -> bool {
+        self.playable_after(finder, observation, &[])
+    }
+
+    /// As `playable`, with `later` known to follow NEXT (from the seed).
+    pub fn playable_after(
+        &self,
+        finder: &mut Finder,
+        observation: &Observation,
+        later: &[Piece],
+    ) -> bool {
         let Some(progress) = self.progress(&observation.board) else {
             return false;
         };
-        let queue = visible_queue(observation);
+        let mut queue = visible_queue(observation);
+        queue.extend_from_slice(later);
         let supply = Supply::Queue {
             hold: observation.hold,
             queue: &queue,
@@ -339,10 +353,23 @@ pub fn find_perfect_clears(
     observation: &Observation,
     limit: usize,
 ) -> Vec<FoundSolve> {
+    find_perfect_clears_after(finder, observation, &[], limit)
+}
+
+/// As `find_perfect_clears`, with `later` known to follow NEXT: the queue
+/// a confirmed seed gives (`seed::LiveSeed`), so a solve may use pieces not
+/// on screen yet.
+pub fn find_perfect_clears_after(
+    finder: &mut Finder,
+    observation: &Observation,
+    later: &[Piece],
+    limit: usize,
+) -> Vec<FoundSolve> {
     let Some(field) = board_field(&observation.board) else {
         return Vec::new();
     };
-    let queue = visible_queue(observation);
+    let mut queue = visible_queue(observation);
+    queue.extend_from_slice(later);
     let supply = Supply::Queue {
         hold: observation.hold,
         queue: &queue,
@@ -721,6 +748,9 @@ impl KonbiniLibrary {
                             sol_percent: block
                                 .sol
                                 .and_then(|column| parse_percent(cell(row, column))),
+                            sol_cases: block
+                                .sol
+                                .and_then(|column| parse_cases(cell(row, column + 1))),
                             fumen: fumen.to_string(),
                             cells,
                             target,
@@ -966,6 +996,14 @@ fn parse_percent(value: &str) -> Option<f32> {
     value.trim().strip_suffix('%')?.trim().parse().ok()
 }
 
+/// `4956/5040` as (4956, 5040).
+fn parse_cases(value: &str) -> Option<(u32, u32)> {
+    let (cleared, total) = value.trim().split_once('/')?;
+    let total: u32 = total.trim().parse().ok()?;
+    let cleared: u32 = cleared.trim().parse().ok()?;
+    (total > 0 && cleared <= total).then_some((cleared, total))
+}
+
 fn piece_index(piece: Piece) -> usize {
     PIECES
         .iter()
@@ -1153,6 +1191,8 @@ mod tests {
         let library = library(2, SECOND);
         assert_eq!(library.stage_count(2), 2);
         assert_eq!(library.setups[0].sol_percent, Some(100.0));
+        assert_eq!(library.setups[0].sol_cases, Some((5040, 5040)));
+        assert_eq!(library.setups[1].sol_cases, Some((4956, 5040)));
         assert_eq!(library.setups[0].source, "KNEWJADE");
         assert_eq!(library.setups[0].id, "TILJ");
         assert_eq!(library.setups[0].cells.len(), 16);
@@ -1173,6 +1213,8 @@ mod tests {
         assert_eq!(library.setups.len(), 1);
         assert_eq!(library.setups[0].id, "TT-LO");
         assert_eq!(library.setups[0].sol_percent, Some(100.0));
+        // No count beside the percentage on this sheet.
+        assert_eq!(library.setups[0].sol_cases, None);
         assert_eq!(library.setups[0].source, "BRAINDEAD");
     }
 
