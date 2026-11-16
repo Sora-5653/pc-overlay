@@ -177,6 +177,7 @@ pub struct FoundSolve {
 
 impl FoundSolve {
     fn new(board: &Board, height: usize, steps: Vec<Step>) -> Option<Self> {
+        let base = board_field(board)?;
         let mut cells = Vec::new();
         for (y, row) in board.iter().enumerate().take(finder::FIELD_ROWS) {
             for (x, piece) in row.iter().enumerate() {
@@ -204,11 +205,16 @@ impl FoundSolve {
                 }
             }
         }
-        let target = Target::new(
-            cells
-                .iter()
-                .map(|cell| (cell.cell.x, cell.cell.y, cell.piece)),
-        )?;
+        // The board after a line clear in the setup can hold part of a
+        // piece, so its cells are read as they are, not as whole pieces.
+        let target = Target {
+            base,
+            ..Target::new(
+                cells
+                    .iter()
+                    .map(|cell| (cell.cell.x, cell.cell.y, cell.piece)),
+            )?
+        };
         Some(Self {
             steps,
             height,
@@ -1099,6 +1105,35 @@ mod tests {
         let mut off = ooilj;
         off.board[0][0] = Some(T);
         assert!(find_two_line_perfect_clears(&mut finder, &off, 100).is_empty());
+    }
+
+    #[test]
+    fn a_solve_after_a_skim_shows_every_row_left() {
+        // The 5th PC's IO-IZ from a live game: O and two flat I clear the
+        // bottom row and leave the O's top half, then a T. The 3-line solve
+        // was drawn as 2 rows: the 6 cells left are not whole pieces, so one
+        // solve row was taken for cleared.
+        use Piece::*;
+        let mut observation = on_empty(Some(Z), L, [S, J, O, S, L]);
+        for (x, y, piece) in [
+            (0, 0, O),
+            (1, 0, O),
+            (7, 0, T),
+            (8, 0, T),
+            (9, 0, T),
+            (8, 1, T),
+        ] {
+            observation.board[y][x] = Some(piece);
+        }
+        let mut finder = Finder::new();
+        let found = find_perfect_clears(&mut finder, &observation, 8);
+        assert!(!found.is_empty());
+        for solve in &found {
+            assert_eq!(solve.height, 3);
+            let progress = solve.progress(&observation.board).unwrap();
+            assert_eq!(progress.remaining.len(), 24);
+            assert!(progress.remaining.iter().all(|cell| cell.cell.y < 3));
+        }
     }
 
     #[test]
