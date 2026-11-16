@@ -214,13 +214,19 @@ fn main() -> Result<(), Box<dyn Error>> {
                 // on screen while recognition pauses (a piece falling below
                 // the spawn rows, or frames settling after a lock).
                 let guide = tracker.snapshots().last().map(|snapshot| {
-                    unified_guidance(
+                    let guide = unified_guidance(
                         &library,
                         &mut konbini,
                         &tracker,
                         snapshot,
                         args.reviewed_only,
                         prefer_konbini,
+                    );
+                    clear_after_perfect_clear(
+                        guide,
+                        recognition.all_clear_banner,
+                        recognition.observation.as_ref().map(|seen| &seen.board),
+                        &snapshot.observation.board,
                     )
                 });
                 if let Some(guide) = &guide {
@@ -605,6 +611,29 @@ fn unified_guidance(
     guide
 }
 
+/// No cells once the screen shows the perfect clear (an empty board, or the
+/// ALL CLEAR text) while the last tracked state still has the blocks of the
+/// PC: until the empty board is tracked, that state's setup or solve would
+/// stay drawn over the cleared board.
+fn clear_after_perfect_clear(
+    guide: Guide,
+    all_clear_banner: bool,
+    seen: Option<&pc_overlay_core::Board>,
+    tracked: &pc_overlay_core::Board,
+) -> Guide {
+    let cleared_on_screen = all_clear_banner || seen.is_some_and(board_is_empty);
+    if !cleared_on_screen || board_is_empty(tracked) {
+        return guide;
+    }
+    Guide {
+        status: "PC Overlay: perfect clear; searching the next setup".to_string(),
+        cells: Vec::new(),
+        setup_complete: false,
+        pc_rate: None,
+        ..guide
+    }
+}
+
 /// Setup Konbini as a guidance source: the sheet of the tracked PC number.
 /// The sheets are read from the cache folder, and downloaded in the
 /// background when it is empty.
@@ -636,6 +665,8 @@ struct KonbiniGuide {
     two_line_shown: bool,
     /// Next placements for a built setup HOLD and NEXT cannot finish yet.
     staged: Option<StagedSession>,
+    /// Time spent rating candidates per frame (`RATE_BUDGET`).
+    rate_budget: Duration,
 }
 
 /// Perfect clears found by the solve search, cycled by Ctrl+Alt+N / B.
@@ -699,6 +730,7 @@ impl KonbiniGuide {
             two_line: None,
             two_line_shown: false,
             staged: None,
+            rate_budget: RATE_BUDGET,
         }
     }
 
@@ -892,10 +924,31 @@ impl KonbiniGuide {
             shortlist,
             snapshot,
             &mut self.index,
-            RATE_BUDGET,
+            self.rate_budget,
         );
         let shortlist = &*shortlist;
         let observation = &snapshot.observation;
+        // A new PC on an empty board: nothing until every candidate is
+        // rated, so the best setup appears once instead of the sheet's
+        // first one switching to it a few frames later.
+        let rated = shortlist
+            .iter()
+            .filter(|candidate| candidate.rate.is_some())
+            .count();
+        if board_is_empty(&observation.board) && rated < shortlist.len() {
+            return Guide {
+                status: format!(
+                    "PC Overlay [Konbini {}]: searching setups ({rated}/{} rated)",
+                    konbini::stage_label(snapshot.pc_ordinal.get()),
+                    shortlist.len()
+                ),
+                cells: Vec::new(),
+                origin: Origin::Konbini,
+                setup_complete: false,
+                note: None,
+                pc_rate: None,
+            };
+        }
         let show = tracker.guidance().show_solve;
         // Keep only the solves the pieces shown now can still finish: the
         // player may have used HOLD or an order the solve does not allow.
@@ -2702,6 +2755,7 @@ mod tests {
     #[test]
     fn konbini_guide_cycles_and_resets_per_pc() {
         let mut mode = KonbiniGuide::new(PathBuf::from("unused"));
+        mode.rate_budget = Duration::MAX;
         mode.library = Some(konbini_library());
         let tracker = tilj_pc_two();
         let snapshot = tracker.snapshots().last().unwrap();
@@ -2737,6 +2791,70 @@ mod tests {
     }
 
     #[test]
+    fn an_empty_board_shows_nothing_until_every_setup_is_rated() {
+        let mut mode = KonbiniGuide::new(PathBuf::from("unused"));
+        mode.library = Some(konbini_library());
+        // Only the shown candidate is rated per frame.
+        mode.rate_budget = Duration::ZERO;
+        let tracker = tilj_pc_two();
+        let snapshot = tracker.snapshots().last().unwrap();
+        assert!(board_is_empty(&snapshot.observation.board));
+
+        let searching = mode.guide(&tracker, snapshot);
+        assert!(searching.cells.is_empty());
+        assert!(
+            searching
+                .status
+                .contains("[Konbini 2nd]: searching setups (1/2 rated)"),
+            "{}",
+            searching.status
+        );
+
+        // A later frame rates the other one: the best setup appears.
+        mode.rate_budget = Duration::MAX;
+        let shown = mode.guide(&tracker, snapshot);
+        assert_eq!(shown.cells.len(), 16);
+        assert!(shown.status.contains("(1/2)"), "{}", shown.status);
+    }
+
+    #[test]
+    fn the_cleared_board_hides_the_last_guide() {
+        let guide = || Guide {
+            status: "PC Overlay [Konbini 2nd]: solve active".to_string(),
+            cells: vec![OverlayCell {
+                cell: Cell { x: 0, y: 0 },
+                piece: Some(Piece::I),
+                kind: OverlayCellKind::Missing,
+            }],
+            origin: Origin::Konbini,
+            setup_complete: true,
+            note: None,
+            pc_rate: Some(90.0),
+        };
+        let mut built = empty_board();
+        built[0][0] = Some(Piece::T);
+        let empty = empty_board();
+
+        // The screen shows the empty board, or the ALL CLEAR text, while the
+        // tracked state is still the PC's last one.
+        for (banner, seen) in [(false, Some(&empty)), (true, None), (true, Some(&built))] {
+            let cleared = clear_after_perfect_clear(guide(), banner, seen, &built);
+            assert!(cleared.cells.is_empty());
+            assert!(!cleared.setup_complete && cleared.pc_rate.is_none());
+            assert!(
+                cleared.status.contains("perfect clear"),
+                "{}",
+                cleared.status
+            );
+        }
+        // Still building, or the empty board already tracked: unchanged.
+        let kept = clear_after_perfect_clear(guide(), false, Some(&built), &built);
+        assert_eq!(kept.cells.len(), 1);
+        let kept = clear_after_perfect_clear(guide(), true, Some(&empty), &empty);
+        assert_eq!(kept.cells.len(), 1);
+    }
+
+    #[test]
     fn konbini_guide_explains_missing_data() {
         let mut mode = KonbiniGuide::new(PathBuf::from("unused"));
         let tracker = tilj_pc_two();
@@ -2766,6 +2884,8 @@ mod tests {
 
     fn konbini_guide() -> KonbiniGuide {
         let mut konbini = KonbiniGuide::new(PathBuf::from("unused"));
+        // Every candidate rated in one frame, so a test never waits on time.
+        konbini.rate_budget = Duration::MAX;
         let mut library = konbini_library();
         // One 3rd-PC setup, so a later PC has a sheet of its own.
         library.add_stage_csv(3, KONBINI_SECOND);

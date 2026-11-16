@@ -31,7 +31,7 @@ Ctrl+Alt+F  -  download the Setup Konbini sheets again
 Ctrl+Alt+1..7  -  set the PC number (if it was miscounted)
 R / Ctrl+Z / Ctrl+Y  -  TETR.IO's retry / undo / redo, read as hints (run-overlay --retry-key for another retry key)";
 
-/// Paths the overlay reads, relative to the working directory.
+/// Paths the overlay reads, under the folder `find_root` picks.
 struct DataPaths {
     calibration: PathBuf,
     rules: PathBuf,
@@ -112,6 +112,24 @@ fn data_status(paths: &DataPaths) -> Vec<String> {
     lines
 }
 
+/// The folder whose `data/` the overlay reads: the working directory if it
+/// holds the rules, else the first folder at or above this program that
+/// does. Double-clicking `target/release/pc-overlay-gui.exe` starts it in
+/// `target/release`, which has no `data/`; walking up from the program finds
+/// the repository. Falls back to the working directory, so the status lines
+/// say what is missing.
+fn find_root(working_dir: &Path, exe: Option<&Path>) -> PathBuf {
+    let holds_data = |dir: &Path| dir.join("data/ijlo.json").is_file();
+    if holds_data(working_dir) {
+        return working_dir.to_path_buf();
+    }
+    exe.and_then(Path::parent)
+        .into_iter()
+        .flat_map(Path::ancestors)
+        .find(|dir| !dir.as_os_str().is_empty() && holds_data(dir))
+        .map_or_else(|| working_dir.to_path_buf(), Path::to_path_buf)
+}
+
 /// The executable `name` next to this one (`target/release` after
 /// `cargo build --release`).
 fn sibling_exe(name: &str) -> Option<PathBuf> {
@@ -123,6 +141,7 @@ fn sibling_exe(name: &str) -> Option<PathBuf> {
 
 /// The window's state: child processes, the fetch, and the last message.
 struct App {
+    root: PathBuf,
     paths: DataPaths,
     overlay: Option<Child>,
     overlay_state: ProcessState,
@@ -135,6 +154,7 @@ struct App {
 impl App {
     fn new(root: &Path) -> Self {
         Self {
+            root: root.to_path_buf(),
             paths: DataPaths::under(root),
             overlay: None,
             overlay_state: ProcessState::Stopped,
@@ -145,11 +165,14 @@ impl App {
         }
     }
 
-    fn spawn(name: &str) -> Result<Child, String> {
+    /// Starts `name` in the data folder, since the overlay and the
+    /// calibration read and write `data/` relative to their working directory.
+    fn spawn(&self, name: &str) -> Result<Child, String> {
         let exe = sibling_exe(name).ok_or_else(|| {
             format!("{name} not found next to this program; run `cargo build --release` first")
         })?;
         Command::new(exe)
+            .current_dir(&self.root)
             .spawn()
             .map_err(|error| format!("{name}: {error}"))
     }
@@ -159,7 +182,7 @@ impl App {
             self.message = "The overlay is already running.".to_string();
             return;
         }
-        match Self::spawn("run-overlay") {
+        match self.spawn("run-overlay") {
             Ok(child) => {
                 self.overlay_state = ProcessState::Running(child.id());
                 self.overlay = Some(child);
@@ -186,7 +209,7 @@ impl App {
             self.message = "Calibration is already open.".to_string();
             return;
         }
-        match Self::spawn("configure-overlay") {
+        match self.spawn("configure-overlay") {
             Ok(child) => {
                 self.calibration_state = ProcessState::Running(child.id());
                 self.calibration = Some(child);
@@ -243,6 +266,7 @@ impl App {
         let mut lines = vec![
             describe("Overlay", &self.overlay_state),
             describe("Calibration", &self.calibration_state),
+            format!("Data folder: {}", self.root.display()),
         ];
         lines.extend(data_status(&self.paths));
         lines.push(String::new());
@@ -461,7 +485,9 @@ mod gui {
 
 #[cfg(windows)]
 fn main() -> Result<(), String> {
-    let root = std::env::current_dir().map_err(|error| error.to_string())?;
+    let working_dir = std::env::current_dir().map_err(|error| error.to_string())?;
+    let exe = std::env::current_exe().ok();
+    let root = find_root(&working_dir, exe.as_deref());
     gui::run(App::new(&root))
 }
 
@@ -509,6 +535,40 @@ mod tests {
             text.starts_with("Overlay: running (pid 42)\r\nCalibration: exited with code 1\r\n")
         );
         assert!(text.ends_with("\r\n\r\nReady."));
+    }
+
+    #[test]
+    fn find_root_walks_up_from_the_program_to_the_data() {
+        let exe = root().join("target/release/pc-overlay-gui.exe");
+        let release = root().join("target/release");
+        assert_eq!(find_root(&release, Some(&exe)), root());
+    }
+
+    #[test]
+    fn find_root_prefers_a_working_directory_with_data() {
+        let elsewhere = Path::new("no such folder/pc-overlay-gui.exe");
+        assert_eq!(find_root(&root(), Some(elsewhere)), root());
+    }
+
+    #[test]
+    fn find_root_falls_back_to_the_working_directory() {
+        let nowhere = std::env::temp_dir().join("no such pc-overlay folder");
+        let exe = nowhere.join("pc-overlay-gui.exe");
+        assert_eq!(find_root(&nowhere, Some(&exe)), nowhere);
+        assert_eq!(find_root(&nowhere, None), nowhere);
+        // A relative program path must not end at the empty path, which
+        // would mean whatever the working directory happens to be.
+        let relative = Path::new("no such folder/pc-overlay-gui.exe");
+        assert_eq!(find_root(&nowhere, Some(relative)), nowhere);
+    }
+
+    #[test]
+    fn status_text_names_the_data_folder() {
+        let app = App::new(Path::new("no such folder"));
+        assert!(
+            app.status_text()
+                .contains("\r\nData folder: no such folder\r\n")
+        );
     }
 
     #[test]
