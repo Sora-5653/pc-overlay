@@ -644,6 +644,50 @@ pub fn find_two_line_perfect_clears(
         .collect()
 }
 
+/// The state after `piece` locks on `cells` (live board cells): full rows
+/// clear, the queue moves on by one, and `revealed` appears at the end of
+/// NEXT. `from_hold` plays the HOLD piece, which leaves Current in HOLD.
+/// `None` when the cells are not on the board, are taken, or `from_hold`
+/// has an empty HOLD (the swap would deal a second unseen piece).
+pub fn observation_after(
+    observation: &Observation,
+    piece: Piece,
+    cells: &[Cell],
+    from_hold: bool,
+    revealed: Piece,
+) -> Option<Observation> {
+    let mut board = observation.board;
+    for cell in cells {
+        let slot = board
+            .get_mut(usize::from(cell.y))?
+            .get_mut(usize::from(cell.x))?;
+        if slot.is_some() {
+            return None;
+        }
+        *slot = Some(piece);
+    }
+    let mut kept = crate::model::empty_board();
+    let left = board.iter().filter(|line| line.iter().any(Option::is_none));
+    for (row, line) in kept.iter_mut().zip(left) {
+        *row = *line;
+    }
+    let hold = if from_hold {
+        observation.hold?;
+        Some(observation.current)
+    } else {
+        observation.hold
+    };
+    let [first, rest @ ..] = observation.next5;
+    let mut next5 = [revealed; 5];
+    next5[..4].copy_from_slice(&rest);
+    Some(Observation {
+        board: kept,
+        hold,
+        current: first,
+        next5,
+    })
+}
+
 /// The drawing cells already placed, and the rest as cells of the live
 /// board (after line clears).
 #[derive(Debug, Clone, PartialEq)]
@@ -1073,6 +1117,43 @@ mod tests {
         library.add_stage_csv(stage, text);
         assert!(library.issues.is_empty(), "{:?}", library.issues);
         library
+    }
+
+    #[test]
+    fn the_state_after_a_placement_clears_rows_and_moves_the_queue_on() {
+        use Piece::*;
+        let mut board = empty_board();
+        // Row 0 full but for x 6-9, and one block on row 1.
+        board[0][..6].fill(Some(L));
+        board[1][0] = Some(S);
+        let observation = Observation {
+            board,
+            hold: Some(O),
+            current: I,
+            next5: [T, J, L, S, Z],
+        };
+        let flat = [6, 7, 8, 9].map(|x| Cell { x, y: 0 });
+        let after = observation_after(&observation, I, &flat, false, O).unwrap();
+        // Row 0 cleared; row 1 dropped to the floor.
+        let mut expected = empty_board();
+        expected[0][0] = Some(S);
+        assert_eq!(after.board, expected);
+        assert_eq!((after.hold, after.current), (Some(O), T));
+        assert_eq!(after.next5, [J, L, S, Z, O]);
+
+        // From HOLD: Current takes its place there.
+        let square = [(6, 0), (7, 0), (6, 1), (7, 1)].map(|(x, y)| Cell { x, y });
+        let after = observation_after(&observation, O, &square, true, I).unwrap();
+        assert_eq!((after.hold, after.current), (Some(I), T));
+        assert_eq!(after.board[1][6], Some(O));
+
+        // Taken cells, and HOLD from an empty slot, have no single next state.
+        assert!(observation_after(&observation, I, &[Cell { x: 0, y: 0 }], false, O).is_none());
+        let empty_hold = Observation {
+            hold: None,
+            ..observation
+        };
+        assert!(observation_after(&empty_hold, O, &square, true, I).is_none());
     }
 
     #[test]

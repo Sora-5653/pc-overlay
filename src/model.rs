@@ -76,7 +76,7 @@ pub fn board_is_empty(board: &Board) -> bool {
 
 /// A fully recognized stable observation. Partial/low-confidence frames never
 /// enter this type and are rejected by the recognition boundary.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Observation {
     pub board: Board,
     pub hold: Option<Piece>,

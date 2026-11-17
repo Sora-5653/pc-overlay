@@ -3,16 +3,16 @@ use std::{
     error::Error,
     fs,
     path::{Path, PathBuf},
-    sync::mpsc,
+    sync::{Arc, mpsc},
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use pc_overlay_core::{
-    BoardCalibration, CommitOutcome, DiagramSet, FrameSize, GameKey, OverlayBoard, OverlayCell,
-    OverlayCellKind, OverlayState, OverlayWindow, PcOrdinal, Piece, Placement, RecognizerConfig,
-    RuleSet, SessionTracker, SolveProgress, SourceSections, StabilityConfig, StabilityFilter,
-    TetrioRecognizer, TrackerConfig, WindowInfo, WindowLocator, board_is_empty,
+    BoardCalibration, Cell, CommitOutcome, DiagramSet, FrameSize, GameKey, OverlayBoard,
+    OverlayCell, OverlayCellKind, OverlayState, OverlayWindow, PcOrdinal, Piece, Placement,
+    RecognizerConfig, RuleSet, SessionTracker, SolveProgress, SourceSections, StabilityConfig,
+    StabilityFilter, TetrioRecognizer, TrackerConfig, WindowInfo, WindowLocator, board_is_empty,
     finder::{Buildable, Finder},
     konbini,
     konbini::{BuildQuery, FoundSolve, KonbiniLibrary, KonbiniProgress},
@@ -21,6 +21,11 @@ use pc_overlay_core::{
     tracker::case_size,
     window::foreground_handle,
 };
+
+#[path = "run_overlay/ponder.rs"]
+mod ponder;
+
+use ponder::{Job, Ponder, Predicted};
 
 #[derive(Debug, Default)]
 struct Args {
@@ -81,7 +86,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     let hotkeys = keyboard_hook::start(args.retry_key);
     let mut solve_notice: Option<(&'static str, Instant)> = None;
     let mut konbini = KonbiniGuide::new(args.konbini.clone());
+    if !args.once {
+        konbini.ponder = Ponder::spawn();
+    }
     konbini.load_or_fetch();
+    // The state last pondered from, and the placements its guide asked for.
+    let mut pondered: Option<PonderedFrom> = None;
     // Ctrl+Alt+K: the 2nd and 7th PCs use Setup Konbini even when the source has rules.
     let mut prefer_konbini = false;
     // Whether the last stable frame showed a completed setup with a solve.
@@ -147,6 +157,9 @@ fn main() -> Result<(), Box<dyn Error>> {
             // recognition until it has focus again.
             Ok(Some(window)) if foreground_handle() != Some(window.handle) => {
                 stability.clear_pending();
+                if pondered.take().is_some() {
+                    konbini.ponder.new_state();
+                }
                 overlay.update(None, OverlayState::default())?;
             }
             Ok(Some(window)) => {
@@ -234,6 +247,19 @@ fn main() -> Result<(), Box<dyn Error>> {
                     _ => Vec::new(),
                 };
                 let guide = tracker.snapshots().last().map(|snapshot| {
+                    let state = (snapshot.pc_ordinal.get(), snapshot.observation.clone());
+                    if pondered.as_ref().is_none_or(|from| from.state != state) {
+                        // A new state: the speculation for others is moot.
+                        konbini.ponder.new_state();
+                        if args.verbose {
+                            let (hits, misses) = konbini.ponder.counts();
+                            eprintln!("ponder: {hits} hits, {misses} computed here");
+                        }
+                        pondered = Some(PonderedFrom {
+                            state,
+                            placements: None,
+                        });
+                    }
                     let guide = unified_guidance(
                         &library,
                         &mut konbini,
@@ -242,6 +268,17 @@ fn main() -> Result<(), Box<dyn Error>> {
                         args.reviewed_only,
                         prefer_konbini,
                     );
+                    // Ponder on the player's time: the states the guide
+                    // leads to, again when the guide changes its mind (the
+                    // ratings reorder the setups).
+                    let placements = konbini.next_placements(snapshot, &guide);
+                    let from = pondered.as_mut().expect("set above");
+                    if konbini.ponder.enabled() && from.placements.as_ref() != Some(&placements) {
+                        for predicted in predict_next(&placements, &tracker, snapshot) {
+                            konbini.ponder.submit_explore(predicted);
+                        }
+                        from.placements = Some(placements);
+                    }
                     clear_after_perfect_clear(
                         guide,
                         recognition.all_clear_banner,
@@ -304,6 +341,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         thread::sleep(Duration::from_millis(args.interval_ms.max(20)));
     }
     Ok(())
+}
+
+/// The state pondering last started from (PC number and observation), and
+/// the placements explored from it.
+struct PonderedFrom {
+    state: (u8, pc_overlay_core::Observation),
+    placements: Option<Vec<(Piece, Vec<Cell>)>>,
 }
 
 /// The PIECES counter, trusted once two consecutive frames read the same
@@ -683,7 +727,11 @@ fn clear_after_perfect_clear(
 /// background when it is empty.
 struct KonbiniGuide {
     dir: PathBuf,
-    library: Option<KonbiniLibrary>,
+    library: Option<Arc<KonbiniLibrary>>,
+    /// Version of `library`, moved on at each replacement (`Job` keys).
+    lib: u64,
+    /// Runs the searches ahead of time (`Ponder::disabled` runs them here).
+    ponder: Ponder,
     fetching: Option<mpsc::Receiver<Result<KonbiniLibrary, String>>>,
     error: Option<String>,
     /// The candidate shown, cycled by Ctrl+Alt+N / B.
@@ -744,6 +792,107 @@ struct StagedSession {
 /// Perfect clears kept per search.
 const SOLVE_LIMIT: usize = 100;
 
+/// Staged placements pondered, best first.
+const STAGED_PONDERED: usize = 3;
+
+/// Whether a piece on `cells` rests on the floor or the board (a floating
+/// part of a drawing is placed later, not next).
+fn supported(board: &pc_overlay_core::Board, cells: &[Cell]) -> bool {
+    cells.iter().any(|cell| {
+        cell.y == 0
+            || board
+                .get(usize::from(cell.y) - 1)
+                .and_then(|row| row.get(usize::from(cell.x)))
+                .is_some_and(Option::is_some)
+    })
+}
+
+/// The states the player is likely to reach from `snapshot`, most likely
+/// first, given the guide's `placements` (`KonbiniGuide::next_placements`):
+/// Current placed where the guide shows it,
+/// HOLD pressed, and the HOLD piece placed where shown, each with every
+/// piece the 7-bag allows at the end of NEXT (`Ponder::submit_explore`).
+/// None that empties the board: that perfect clear starts a new PC.
+fn predict_next(
+    placements: &[(Piece, Vec<Cell>)],
+    tracker: &SessionTracker,
+    snapshot: &pc_overlay_core::tracker::Snapshot,
+) -> Vec<Predicted> {
+    let observation = &snapshot.observation;
+    let stage = snapshot.pc_ordinal.get();
+    let pieces = pc_pieces(tracker, snapshot);
+    // The PC started with Current and NEXT (6 pieces) disclosed and HOLD
+    // from before it: Current's absolute index, as `rate_shortlist` counts.
+    let current_index = 10 * usize::from(stage - 1) + pieces.len().saturating_sub(6);
+    let queue: Vec<Piece> = std::iter::once(observation.current)
+        .chain(observation.next5)
+        .collect();
+    let revealed = pc_overlay_core::finder::bag_options(current_index, &queue, 1)
+        .pop()
+        .unwrap_or_default();
+    let with_revealed = |after: &dyn Fn(Piece) -> Option<pc_overlay_core::Observation>| {
+        revealed
+            .iter()
+            .filter_map(|piece| {
+                let observation = after(*piece)?;
+                let mut pc_pieces = pieces.clone();
+                pc_pieces.push(*piece);
+                Some(Predicted {
+                    stage,
+                    observation,
+                    pc_pieces,
+                })
+            })
+            .filter(|predicted| !board_is_empty(&predicted.observation.board))
+            .collect::<Vec<_>>()
+    };
+    let shifted = |revealed: Piece| {
+        let [first, rest @ ..] = observation.next5;
+        let mut next5 = [revealed; 5];
+        next5[..4].copy_from_slice(&rest);
+        (first, next5)
+    };
+    let mut predicted = Vec::new();
+    for (piece, cells) in placements
+        .iter()
+        .filter(|(piece, _)| *piece == observation.current)
+    {
+        predicted.extend(with_revealed(&|revealed| {
+            konbini::observation_after(observation, *piece, cells, false, revealed)
+        }));
+    }
+    match observation.hold {
+        Some(held) if held != observation.current => {
+            predicted.push(Predicted {
+                stage,
+                observation: pc_overlay_core::Observation {
+                    hold: Some(observation.current),
+                    current: held,
+                    ..observation.clone()
+                },
+                pc_pieces: pieces.clone(),
+            });
+            for (piece, cells) in placements.iter().filter(|(piece, _)| *piece == held) {
+                predicted.extend(with_revealed(&|revealed| {
+                    konbini::observation_after(observation, *piece, cells, true, revealed)
+                }));
+            }
+        }
+        Some(_) => {}
+        // HOLD into the empty slot deals the next piece as Current.
+        None => predicted.extend(with_revealed(&|revealed| {
+            let (current, next5) = shifted(revealed);
+            Some(pc_overlay_core::Observation {
+                hold: Some(observation.current),
+                current,
+                next5,
+                ..observation.clone()
+            })
+        })),
+    }
+    predicted
+}
+
 /// What a shortlist depends on: PC number, observation, and PC pieces.
 type ShortlistKey = (u8, pc_overlay_core::Observation, Vec<Piece>);
 
@@ -769,6 +918,8 @@ impl KonbiniGuide {
         Self {
             dir,
             library: None,
+            lib: 0,
+            ponder: Ponder::disabled(),
             fetching: None,
             error: None,
             index: 0,
@@ -792,11 +943,20 @@ impl KonbiniGuide {
         match KonbiniLibrary::load_dir(&self.dir) {
             Ok(library) => {
                 eprintln!("Setup Konbini: {} setups loaded", library.setups.len());
-                self.library = Some(library);
+                self.set_library(library);
             }
             Err(konbini::KonbiniError::NotFetched(_)) => self.start_fetch(),
             Err(error) => self.error = Some(error.to_string()),
         }
+    }
+
+    /// Replaces the Setup Konbini data, for the guide and the pondering.
+    fn set_library(&mut self, library: KonbiniLibrary) {
+        let library = Arc::new(library);
+        self.lib += 1;
+        self.ponder.set_library(self.lib, Arc::clone(&library));
+        self.library = Some(library);
+        self.shortlist = None;
     }
 
     fn apply(&mut self, hotkey: KonbiniHotkey) {
@@ -866,8 +1026,10 @@ impl KonbiniGuide {
             !session.solves.is_empty()
         });
         if !kept {
-            let solves =
-                konbini::find_two_line_perfect_clears(&mut self.finder, observation, SOLVE_LIMIT);
+            let solves = self
+                .ponder
+                .get_or_compute(Job::TwoLine(observation.clone()), &mut self.finder, None)
+                .solves();
             self.two_line = (!solves.is_empty()).then(|| SolveSession {
                 solves,
                 index: 0,
@@ -886,6 +1048,80 @@ impl KonbiniGuide {
             self.two_line = None;
         }
         guide
+    }
+
+    /// Placements the guide just shown asks for next, whether or not the
+    /// solve is displayed: the 2-line PC, the perfect clear, or the setup
+    /// followed, else the best staged placements, as (piece, live cells).
+    /// Only a piece with exactly 4 cells left that rests on something.
+    fn next_placements(
+        &self,
+        snapshot: &pc_overlay_core::tracker::Snapshot,
+        guide: &Guide,
+    ) -> Vec<(Piece, Vec<Cell>)> {
+        let board = &snapshot.observation.board;
+        let remaining = |session: &SolveSession| -> Option<Vec<(Cell, Option<Piece>)>> {
+            let count = session.solves.len() as isize;
+            let solve =
+                (count > 0).then(|| &session.solves[session.index.rem_euclid(count) as usize])?;
+            let progress = solve.progress(board)?;
+            Some(
+                progress
+                    .remaining
+                    .iter()
+                    .map(|cell| (cell.cell, cell.piece))
+                    .collect(),
+            )
+        };
+        let drawn: Option<Vec<(Cell, Option<Piece>)>> = match guide.origin {
+            Origin::Source => Some(
+                guide
+                    .cells
+                    .iter()
+                    .map(|cell| (cell.cell, cell.piece))
+                    .collect(),
+            ),
+            Origin::TwoLine => self.two_line.as_ref().and_then(remaining),
+            Origin::Konbini => {
+                if let Some(cells) = self.solve.as_ref().and_then(remaining) {
+                    Some(cells)
+                } else if let Some(staged) = self
+                    .staged
+                    .as_ref()
+                    .filter(|staged| staged.observation == snapshot.observation)
+                {
+                    return staged
+                        .moves
+                        .iter()
+                        .take(STAGED_PONDERED)
+                        .map(|staged| (staged.piece, staged.cells.clone()))
+                        .filter(|(_, cells)| supported(board, cells))
+                        .collect();
+                } else {
+                    self.shortlist.as_ref().and_then(|(_, shortlist)| {
+                        let count = shortlist.len() as isize;
+                        (count > 0).then(|| {
+                            shortlist[self.index.rem_euclid(count) as usize]
+                                .progress
+                                .remaining
+                                .iter()
+                                .map(|cell| (cell.cell, cell.piece))
+                                .collect()
+                        })
+                    })
+                }
+            }
+        };
+        let mut by_piece: BTreeMap<Piece, Vec<Cell>> = BTreeMap::new();
+        for (cell, piece) in drawn.unwrap_or_default() {
+            if let Some(piece) = piece {
+                by_piece.entry(piece).or_default().push(cell);
+            }
+        }
+        by_piece
+            .into_iter()
+            .filter(|(_, cells)| cells.len() == 4 && supported(board, cells))
+            .collect()
     }
 
     fn start_fetch(&mut self) {
@@ -909,8 +1145,7 @@ impl KonbiniGuide {
         match receiver.try_recv() {
             Ok(Ok(library)) => {
                 eprintln!("Setup Konbini: {} setups loaded", library.setups.len());
-                self.library = Some(library);
-                self.shortlist = None;
+                self.set_library(library);
                 self.fetching = None;
             }
             Ok(Err(error)) => {
@@ -942,7 +1177,7 @@ impl KonbiniGuide {
         } else {
             None
         };
-        let Some(library) = self.library.as_ref().filter(|_| message.is_none()) else {
+        let Some(library) = self.library.clone().filter(|_| message.is_none()) else {
             return Guide {
                 status: format!(
                     "PC Overlay [Konbini]: {}",
@@ -968,12 +1203,26 @@ impl KonbiniGuide {
             if self.finder.cached_moves() > FINDER_CACHE_LIMIT {
                 self.finder.clear_cache();
             }
-            let shortlist = konbini_shortlist(library, &mut self.finder, tracker, snapshot);
+            let shortlist = self
+                .ponder
+                .get_or_compute(
+                    Job::Shortlist {
+                        lib: self.lib,
+                        stage: key.0,
+                        observation: key.1.clone(),
+                        pc_pieces: key.2.clone(),
+                    },
+                    &mut self.finder,
+                    Some(&library),
+                )
+                .shortlist();
             self.shortlist = Some((key, shortlist));
         }
+        let library = &*library;
         let shortlist = &mut self.shortlist.as_mut().expect("just computed").1;
         rate_shortlist(
             library,
+            (&self.ponder, self.lib),
             &mut self.finder,
             shortlist,
             snapshot,
@@ -1049,12 +1298,24 @@ impl KonbiniGuide {
             // seed's pieces after NEXT when the seed queue is ON.
             self.searched = Some((observation.clone(), self.later.clone()));
             self.staged = None;
-            let solves = konbini::find_perfect_clears_after(
-                &mut self.finder,
-                observation,
-                &self.later,
-                SOLVE_LIMIT,
-            );
+            // The workers search with the pieces on screen only, so with
+            // the seed's pieces after NEXT the search runs here.
+            let solves = if self.later.is_empty() {
+                self.ponder
+                    .get_or_compute(
+                        Job::PerfectClears(observation.clone()),
+                        &mut self.finder,
+                        None,
+                    )
+                    .solves()
+            } else {
+                konbini::find_perfect_clears_after(
+                    &mut self.finder,
+                    observation,
+                    &self.later,
+                    SOLVE_LIMIT,
+                )
+            };
             if solves.is_empty() {
                 // None with the pieces shown: the next placement that keeps
                 // one for the most orders after NEXT, a piece at a time.
@@ -1072,7 +1333,13 @@ impl KonbiniGuide {
                 let first_index = placed
                     .map(|placed| 10 * usize::from(snapshot.pc_ordinal.get() - 1) + placed + hold);
                 let moves = first_index.map_or_else(Vec::new, |first_index| {
-                    konbini::staged_moves(&mut self.finder, observation, first_index)
+                    self.ponder
+                        .get_or_compute(
+                            Job::Staged(observation.clone(), first_index),
+                            &mut self.finder,
+                            None,
+                        )
+                        .staged()
                 });
                 if !moves.is_empty() {
                     self.staged = Some(StagedSession {
@@ -1315,17 +1582,33 @@ fn pc_pieces(
 
 /// The setups of the snapshot's PC that match the board and can be built
 /// from its HOLD and queue.
+#[cfg(test)]
 fn konbini_shortlist(
     library: &KonbiniLibrary,
     finder: &mut Finder,
     tracker: &SessionTracker,
     snapshot: &pc_overlay_core::tracker::Snapshot,
 ) -> Vec<Shortlisted> {
-    let stage = snapshot.pc_ordinal.get();
-    let pieces = pc_pieces(tracker, snapshot);
+    shortlist_for(
+        library,
+        finder,
+        snapshot.pc_ordinal.get(),
+        &snapshot.observation,
+        &pc_pieces(tracker, snapshot),
+    )
+}
+
+/// `konbini_shortlist` from its inputs alone (`ponder::Job::Shortlist`).
+fn shortlist_for(
+    library: &KonbiniLibrary,
+    finder: &mut Finder,
+    stage: u8,
+    observation: &pc_overlay_core::Observation,
+    pieces: &[Piece],
+) -> Vec<Shortlisted> {
     let query = BuildQuery {
-        pc_pieces: &pieces,
-        observation: &snapshot.observation,
+        pc_pieces: pieces,
+        observation,
         // A perfect-clear loop deals 10 pieces per PC.
         pieces_before_pc: Some(10 * usize::from(stage - 1)),
     };
@@ -1345,8 +1628,14 @@ fn konbini_shortlist(
 /// spent (at least one per call); the rest wait for the next frame. Once
 /// every candidate is rated they are ordered by that rate (setups buildable
 /// whatever the next pieces still first), and `index` follows the shown one.
+///
+/// The ratings go through `ponder` (with the library version): those the
+/// workers computed ahead are taken whatever the budget, the others are
+/// queued for the workers, and one a worker is running is left for a later
+/// frame instead of waited for (except the shown one).
 fn rate_shortlist(
     library: &KonbiniLibrary,
+    (ponder, lib): (&Ponder, u64),
     finder: &mut Finder,
     shortlist: &mut [Shortlisted],
     snapshot: &pc_overlay_core::tracker::Snapshot,
@@ -1360,28 +1649,59 @@ fn rate_shortlist(
     let observation = &snapshot.observation;
     // As for the build search: 10 pieces per earlier PC (the 7-bag position).
     let before = 10 * usize::from(snapshot.pc_ordinal.get() - 1);
+    let job = |candidate: &Shortlisted| Job::Rate {
+        lib,
+        setup: candidate.setup,
+        observation: observation.clone(),
+        first_index: before
+            + candidate.progress.placed_pieces()
+            + usize::from(observation.hold.is_some()),
+    };
     let shown = index.rem_euclid(shortlist.len() as isize) as usize;
-    let order = std::iter::once(shown).chain((0..shortlist.len()).filter(|at| *at != shown));
+    let order: Vec<usize> = std::iter::once(shown)
+        .chain((0..shortlist.len()).filter(|at| *at != shown))
+        .collect();
+    ponder.submit_front(
+        order
+            .iter()
+            .filter(|at| shortlist[**at].rate.is_none())
+            .map(|at| job(&shortlist[*at]))
+            .collect(),
+        Some(library),
+    );
     for at in order {
         if shortlist[at].rate.is_some() {
             continue;
         }
-        if started.elapsed() >= budget && at != shown {
-            return;
+        let job = job(&shortlist[at]);
+        let rate = if at == shown {
+            Some(ponder.get_or_compute(job, finder, Some(library)))
+        } else if started.elapsed() >= budget {
+            ponder.peek(&job)
+        } else {
+            ponder.try_get_or_steal(job, finder, Some(library))
+        };
+        if let Some(rate) = rate {
+            shortlist[at].rate = Some(rate.rate());
         }
-        let candidate = &mut shortlist[at];
-        let first_index =
-            before + candidate.progress.placed_pieces() + usize::from(observation.hold.is_some());
-        candidate.rate = Some(konbini::state_pc_rate(
-            finder,
-            &library.setups[candidate.setup],
-            &candidate.progress,
-            observation,
-            first_index,
-        ));
+    }
+    if shortlist.iter().any(|candidate| candidate.rate.is_none()) {
+        return;
     }
     let shown_setup = shortlist[shown].setup;
-    // Stable: ties keep the sheet's order.
+    sort_rated(shortlist);
+    if *index != 0 {
+        // A candidate picked with Ctrl+Alt+N / B stays shown.
+        *index = shortlist
+            .iter()
+            .position(|candidate| candidate.setup == shown_setup)
+            .expect("still listed") as isize;
+    }
+}
+
+/// Orders rated candidates: buildable whatever the next pieces first, then
+/// by PC rate. Stable: ties keep the sheet's order.
+fn sort_rated(shortlist: &mut [Shortlisted]) {
     shortlist.sort_by(|a, b| {
         let key = |candidate: &Shortlisted| {
             (
@@ -1391,13 +1711,6 @@ fn rate_shortlist(
         };
         key(a).partial_cmp(&key(b)).expect("rates are finite")
     });
-    if *index != 0 {
-        // A candidate picked with Ctrl+Alt+N / B stays shown.
-        *index = shortlist
-            .iter()
-            .position(|candidate| candidate.setup == shown_setup)
-            .expect("still listed") as isize;
-    }
 }
 
 #[cfg(test)]
@@ -1411,6 +1724,7 @@ fn konbini_guidance(
     let mut shortlist = konbini_shortlist(library, &mut finder, tracker, snapshot);
     rate_shortlist(
         library,
+        (&Ponder::disabled(), 0),
         &mut finder,
         &mut shortlist,
         snapshot,
@@ -2772,6 +3086,7 @@ mod tests {
         let mut index = 1;
         rate_shortlist(
             &library,
+            (&Ponder::disabled(), 0),
             &mut finder,
             &mut shortlist,
             snapshot,
@@ -2781,6 +3096,7 @@ mod tests {
         assert!(shortlist[1].rate.is_some() && shortlist[0].rate.is_none());
         rate_shortlist(
             &library,
+            (&Ponder::disabled(), 0),
             &mut finder,
             &mut shortlist,
             snapshot,
@@ -2823,7 +3139,7 @@ mod tests {
     fn konbini_guide_cycles_and_resets_per_pc() {
         let mut mode = KonbiniGuide::new(PathBuf::from("unused"));
         mode.rate_budget = Duration::MAX;
-        mode.library = Some(konbini_library());
+        mode.set_library(konbini_library());
         let tracker = tilj_pc_two();
         let snapshot = tracker.snapshots().last().unwrap();
         assert!(mode.guide(&tracker, snapshot).status.contains("(1/2)"));
@@ -2860,7 +3176,7 @@ mod tests {
     #[test]
     fn an_empty_board_shows_nothing_until_every_setup_is_rated() {
         let mut mode = KonbiniGuide::new(PathBuf::from("unused"));
-        mode.library = Some(konbini_library());
+        mode.set_library(konbini_library());
         // Only the shown candidate is rated per frame.
         mode.rate_budget = Duration::ZERO;
         let tracker = tilj_pc_two();
@@ -2956,7 +3272,7 @@ mod tests {
         let mut library = konbini_library();
         // One 3rd-PC setup, so a later PC has a sheet of its own.
         library.add_stage_csv(3, KONBINI_SECOND);
-        konbini.library = Some(library);
+        konbini.set_library(library);
         konbini
     }
 
@@ -3147,7 +3463,7 @@ mod tests {
             .find(|setup| setup.sol_percent == Some(100.0))
             .unwrap();
         let mut mode = KonbiniGuide::new(PathBuf::from("unused"));
-        mode.library = Some(library.clone());
+        mode.set_library(library.clone());
         let mut tracker = tilj_pc_two();
         // The first HOLD, so a NEXT that does not continue is not a restart.
         assert!(matches!(
@@ -3349,7 +3665,7 @@ mod tests {
     fn the_seed_queue_finds_a_perfect_clear_past_next_and_off_drops_it() {
         let (tracker, snapshot) = lz_iso_pc_four();
         let mut mode = KonbiniGuide::new(PathBuf::from("unused"));
-        mode.library = Some(konbini_library());
+        mode.set_library(konbini_library());
 
         // OFF: only the next placement.
         let guide = mode.guide(&tracker, &snapshot);
@@ -3391,7 +3707,7 @@ mod tests {
     #[test]
     fn the_seed_queue_searches_again_when_solves_were_found_without_it() {
         let mut mode = KonbiniGuide::new(PathBuf::from("unused"));
-        mode.library = Some(konbini_library());
+        mode.set_library(konbini_library());
         let queue = [Piece::S, Piece::Z, Piece::I, Piece::T, Piece::L];
         let tracker = tilj_setup_built(Some(Piece::J), Piece::O, queue);
         let snapshot = tracker.snapshots().last().unwrap().clone();
@@ -3415,9 +3731,112 @@ mod tests {
     }
 
     #[test]
+    fn pondering_ahead_leaves_nothing_to_compute_for_the_state_the_guide_shows() {
+        // TILJ on the 2nd PC: the guide shows where T goes. Pondered on the
+        // player's time, the state after T lands is already searched.
+        let mut pondering = KonbiniGuide::new(PathBuf::from("unused"));
+        pondering.ponder = Ponder::inline();
+        pondering.set_library(konbini_library());
+        let mut plain = KonbiniGuide::new(PathBuf::from("unused"));
+        plain.set_library(konbini_library());
+
+        let mut tracker = tilj_pc_two();
+        let snapshot = tracker.snapshots().last().unwrap().clone();
+        let guide = pondering.guide(&tracker, &snapshot);
+        let expected = plain.guide(&tracker, &snapshot);
+        assert_eq!(guide.status, expected.status);
+        assert_eq!(guide.cells, expected.cells);
+
+        let placements = pondering.next_placements(&snapshot, &guide);
+        let t_cells = placements
+            .iter()
+            .find(|(piece, _)| *piece == Piece::T)
+            .map(|(_, cells)| cells.clone())
+            .expect("the guide places T first");
+        let predicted = predict_next(&placements, &tracker, &snapshot);
+        // The bag of NEXT's end already dealt O and S: five pieces remain.
+        assert_eq!(
+            predicted
+                .iter()
+                .filter(|predicted| predicted.observation.board != snapshot.observation.board)
+                .count(),
+            5
+        );
+        for predicted in predicted.clone() {
+            pondering.ponder.submit_explore(predicted);
+        }
+        let (_, computed) = pondering.ponder.counts();
+
+        // The player places T there and Z shows at the end of NEXT.
+        let mut placed = observation(
+            None,
+            Piece::I,
+            [Piece::L, Piece::J, Piece::O, Piece::S, Piece::Z],
+        );
+        for cell in &t_cells {
+            placed.board[usize::from(cell.y)][usize::from(cell.x)] = Some(Piece::T);
+        }
+        assert!(matches!(
+            tracker.commit(placed, 0.75, 3),
+            CommitOutcome::Accepted { .. }
+        ));
+        let next = tracker.snapshots().last().unwrap().clone();
+        assert!(predicted.iter().any(|predicted| {
+            predicted.observation == next.observation
+                && predicted.pc_pieces == pc_pieces(&tracker, &next)
+        }));
+        pondering.ponder.new_state();
+        let (hits, _) = pondering.ponder.counts();
+        let guide = pondering.guide(&tracker, &next);
+        let (now_hits, now_computed) = pondering.ponder.counts();
+        assert_eq!(
+            now_computed, computed,
+            "nothing computed on the main thread"
+        );
+        assert!(now_hits > hits);
+        let expected = plain.guide(&tracker, &next);
+        assert_eq!(guide.status, expected.status);
+        assert_eq!(guide.cells, expected.cells);
+    }
+
+    #[test]
+    fn a_pondering_thread_gives_the_results_computed_here() {
+        let ponder = Ponder::spawn();
+        let library = Arc::new(konbini_library());
+        ponder.set_library(1, Arc::clone(&library));
+        let tracker = tilj_pc_two();
+        let snapshot = tracker.snapshots().last().unwrap();
+        let job = Job::Shortlist {
+            lib: 1,
+            stage: 2,
+            observation: snapshot.observation.clone(),
+            pc_pieces: pc_pieces(&tracker, snapshot),
+        };
+        ponder.submit_front(vec![job.clone()], Some(&library));
+        let pondered = ponder
+            .get_or_compute(job.clone(), &mut Finder::new(), Some(&library))
+            .shortlist();
+        let here = ponder::run(&job, &mut Finder::new(), Some(&library)).shortlist();
+        let key = |shortlist: &[Shortlisted]| -> Vec<(usize, KonbiniProgress, Buildable)> {
+            shortlist
+                .iter()
+                .map(|candidate| {
+                    (
+                        candidate.setup,
+                        candidate.progress.clone(),
+                        candidate.buildable,
+                    )
+                })
+                .collect()
+        };
+        assert!(!here.is_empty());
+        assert_eq!(key(&pondered), key(&here));
+    }
+
+    #[test]
     fn a_built_konbini_setup_gets_searched_perfect_clears() {
         let mut mode = KonbiniGuide::new(PathBuf::from("unused"));
-        mode.library = Some(konbini_library());
+        mode.set_library(konbini_library());
         let queue = [Piece::S, Piece::Z, Piece::I, Piece::T, Piece::L];
         let mut tracker = tilj_setup_built(Some(Piece::J), Piece::O, queue);
         let snapshot = tracker.snapshots().last().unwrap().clone();
@@ -3615,7 +4034,7 @@ mod tests {
     #[test]
     fn a_solve_the_shown_pieces_cannot_finish_is_dropped() {
         let mut mode = KonbiniGuide::new(PathBuf::from("unused"));
-        mode.library = Some(konbini_library());
+        mode.set_library(konbini_library());
         let queue = [Piece::S, Piece::Z, Piece::I, Piece::T, Piece::L];
         let tracker = tilj_setup_built(Some(Piece::J), Piece::O, queue);
         let snapshot = tracker.snapshots().last().unwrap().clone();
